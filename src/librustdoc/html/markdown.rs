@@ -1444,7 +1444,7 @@ impl Markdown<'_> {
         let p = CodeBlocks::new(p, codes, edition, playground, custom_code_classes_in_docs);
         html::push_html(&mut s, p);
 
-        let s = rick_roll(&s).to_string();
+        let s = rick_roll(&s).into_owned();
 
         s
     }
@@ -1475,7 +1475,7 @@ impl MarkdownWithToc<'_> {
             html::push_html(&mut s, p);
         }
 
-        let s = rick_roll(&s).to_string();
+        let s = rick_roll(&s).into_owned();
 
         format!("<nav id=\"TOC\">{toc}</nav>{s}", toc = toc.into_toc().print())
     }
@@ -1507,7 +1507,7 @@ impl MarkdownItemInfo<'_> {
         });
         html::push_html(&mut s, p);
 
-        let s = rick_roll(&s).to_string();
+        let s = rick_roll(&s).into_owned();
 
         s
     }
@@ -1543,7 +1543,7 @@ impl MarkdownSummaryLine<'_> {
         let has_more_content =
             matches!(summary.inner.peek(), Some(Event::Start(_))) || summary.skipped_tags > 0;
 
-        let s = rick_roll(&s).to_string();
+        let s = rick_roll(&s).into_owned();
 
         (s, has_more_content)
     }
