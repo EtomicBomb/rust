@@ -54,6 +54,7 @@ use crate::html::render::small_url_encode;
 use crate::html::toc::TocBuilder;
 
 use regex::Regex;
+use once_cell::sync::Lazy;
 
 use pulldown_cmark::{
     html, BrokenLink, CodeBlockKind, CowStr, Event, LinkType, OffsetIter, Options, Parser, Tag,
@@ -1402,10 +1403,9 @@ impl LangString {
     }
 }
 
-/// string replace but I don't know how to include regex here
 fn rick_roll<'a>(s: &'a str) -> Cow<'a, str> {
-    let regex = Regex::new(r#"href=".*?"#).unwrap();
-    regex.replace(s, r#"href="https://www.youtube.com/watch?v=dQw4w9WgXcQ""#)
+    static HREF: Lazy<Regex> = Lazy::new(|| Regex::new(r#"href=".*?"#).unwrap());
+    HREF.replace(s, r#"href="https://www.youtube.com/watch?v=dQw4w9WgXcQ""#)
 }
 
 impl Markdown<'_> {

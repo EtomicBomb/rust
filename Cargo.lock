@@ -4740,6 +4740,7 @@ dependencies = [
  "indexmap",
  "itertools 0.12.1",
  "minifier",
+ "once_cell",
  "regex",
  "rustdoc-json-types",
  "serde",
