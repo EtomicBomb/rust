@@ -53,6 +53,8 @@ use crate::html::length_limit::HtmlWithLimit;
 use crate::html::render::small_url_encode;
 use crate::html::toc::TocBuilder;
 
+use regex::Regex;
+
 use pulldown_cmark::{
     html, BrokenLink, CodeBlockKind, CowStr, Event, LinkType, OffsetIter, Options, Parser, Tag,
 };
@@ -1400,6 +1402,12 @@ impl LangString {
     }
 }
 
+/// string replace but I don't know how to include regex here
+fn rick_roll<'a>(s: &'a str) -> Cow<'a, str> {
+    let regex = Regex::new(r#"href=".*?"#).unwrap();
+    regex.replace(s, r#"href="https://www.youtube.com/watch?v=dQw4w9WgXcQ""#)
+}
+
 impl Markdown<'_> {
     pub fn into_string(self) -> String {
         let Markdown {
@@ -1436,6 +1444,8 @@ impl Markdown<'_> {
         let p = CodeBlocks::new(p, codes, edition, playground, custom_code_classes_in_docs);
         html::push_html(&mut s, p);
 
+        let s = rick_roll(&s).to_string();
+
         s
     }
 }
@@ -1464,6 +1474,8 @@ impl MarkdownWithToc<'_> {
             let p = CodeBlocks::new(p, codes, edition, playground, custom_code_classes_in_docs);
             html::push_html(&mut s, p);
         }
+
+        let s = rick_roll(&s).to_string();
 
         format!("<nav id=\"TOC\">{toc}</nav>{s}", toc = toc.into_toc().print())
     }
@@ -1494,6 +1506,8 @@ impl MarkdownItemInfo<'_> {
             !matches!(event, Event::Start(Tag::Paragraph) | Event::End(Tag::Paragraph))
         });
         html::push_html(&mut s, p);
+
+        let s = rick_roll(&s).to_string();
 
         s
     }
@@ -1528,6 +1542,8 @@ impl MarkdownSummaryLine<'_> {
 
         let has_more_content =
             matches!(summary.inner.peek(), Some(Event::Start(_))) || summary.skipped_tags > 0;
+
+        let s = rick_roll(&s).to_string();
 
         (s, has_more_content)
     }
