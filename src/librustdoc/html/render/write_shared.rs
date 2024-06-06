@@ -6,7 +6,6 @@ use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
-use std::iter::once;
 use std::fmt::{self, Display};
 use std::ops::Deref;
 
@@ -36,34 +35,8 @@ use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
 use crate::html::render::StylePath;
 
-struct FsEntry {
-    path: PathBuf, 
-    contents: Vec<u8>,
-}
-
-impl FsEntry {
-    fn new<P: Into<PathBuf>, C: Into<Vec<u8>>>(path: P, contents: C) -> FsEntry {
-        let path = path.into();
-        let contents = contents.into();
-        FsEntry { path, contents }
-    }
-}
-
-//fn encode_sequence_inconsistant<T: Display, I: IntoIterator<Item=EncodedJson<T>>>(items: I) -> EncodedJson<String> {
-//    EncodedJson(format!("[{}]", items.into_iter().format(",")))
-//}
-
-//fn encode_map_inconsistent<K: Display, V: Display, I: IntoIterator<Item=(K, EncodedJson<V>)>>(items: I) -> EncodedJson<String> {
-//    EncodedJson(format!("{{{}}}", items.into_iter().format_with(",", |(k, v), f| f(&format_args!("{k}:{v}")))))
-//}
-
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 struct EncodedJson<T>(T);
-impl<T> EncodedJson<T> {
-    fn into_inner(self) -> T {
-        self.0
-    }
-}
 
 impl<T: Deref> EncodedJson<T> {
     fn as_deref(&self) -> EncodedJson<&<T as Deref>::Target> {
@@ -96,7 +69,7 @@ fn encode_map<K: Display + Ord, V: Display, I: IntoIterator<Item=(K, EncodedJson
 #[allow(dead_code)]
 trait Snip {
     fn merge(&mut self, other: Self);
-    fn render(&self) -> impl Iterator<Item=FsEntry>;
+    fn render(&self) -> String;
 }
 
 
@@ -111,14 +84,32 @@ impl Snip for SearchIndexSnip {
     }
 
     /// Render search-index.js
-    fn render(&self) -> impl Iterator<Item=FsEntry> {
+    fn render(&self) -> String {
         let all_indexes = encode_sequence(self.all_indexes.iter().map(|e| e.as_deref()));
-        let all_indexes = format!(r"#\
+        format!(r"#\
 var searchIndex = new Map(JSON.parse('{all_indexes}'));
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);
-#");
-        once(FsEntry::new("search-index.js", all_indexes))
+#")
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct AllCratesSnip {
+    krates: Vec<String>,
+    page: layout::OwnedPage,
+    layout: layout::Layout,
+    style_files: Vec<StylePath>,
+}
+
+impl Snip for AllCratesSnip {
+    fn merge(&mut self, mut other: Self) {
+        self.krates.append(&mut other.krates);
+    }
+
+    fn render(&self) -> String {
+        let crates = encode_sequence(self.krates.iter().map(|krate| encode_serializable(krate)).collect::<Vec<_>>());
+        format!("window.ALL_CRATES = {crates};")
     }
 }
 
@@ -158,10 +149,7 @@ impl Snip for CrateListSnip {
         self.krates.append(&mut other.krates);
     }
 
-    fn render(&self) -> impl Iterator<Item=FsEntry> {
-        let crates = encode_sequence(self.krates.iter().map(|krate| encode_serializable(krate)).collect::<Vec<_>>());
-        let crates_js = once(FsEntry::new("crates.js", format!("window.ALL_CRATES = {crates};")));
-
+    fn render(&self) -> String {
         let content = format!(
             "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
             self.krates.iter().format_with("", |k, f| {
@@ -171,9 +159,7 @@ impl Snip for CrateListSnip {
                 ))
             })
         );
-        let index_html = layout::render(&self.layout, &self.page.as_page(), "", content, &self.style_files);
-        let index_html = once(FsEntry::new("index.html", index_html));
-        crates_js.chain(index_html)
+        layout::render(&self.layout, &self.page.as_page(), "", content, &self.style_files)
     }
 }
 
@@ -192,25 +178,21 @@ fn implementors_iife(impls: &str, register: &str, pending: &str, json: EncodedJs
 }
 
 struct TypeAliasSnip {
-    path: PathBuf,
     aliases: Vec<(EncodedJson<String>, EncodedJson<String>)>,
 }
 
 impl Snip for TypeAliasSnip {
     fn merge(&mut self, mut other: Self) {
-        assert_eq!(self.path, other.path);
         self.aliases.append(&mut other.aliases);
     }
 
-    fn render(&self) -> impl Iterator<Item=FsEntry> {
+    fn render(&self) -> String {
         let aliases = encode_map(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
-        let content = implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref());
-        once(FsEntry::new(&self.path, content))
+        implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref())
     }
 }
 
 struct TraitAliasSnip {
-    path: PathBuf,
     implementors: Vec<(EncodedJson<String>, EncodedJson<String>)>,
 }
 
@@ -219,10 +201,9 @@ impl Snip for TraitAliasSnip {
         self.implementors.append(&mut other.implementors);
     }
 
-    fn render(&self) -> impl Iterator<Item=FsEntry> {
+    fn render(&self) -> String {
         let implementors = encode_map(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
-        let content = implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref());
-        once(FsEntry::new(&self.path, content))
+        implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref())
     }
 }
 
