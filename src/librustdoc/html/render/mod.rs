@@ -60,7 +60,7 @@ use rustc_span::{
     BytePos, FileName, RealFileName, DUMMY_SP,
 };
 use serde::ser::SerializeMap;
-use serde::{Serialize, Serializer};
+use serde::{Serialize, Serializer, Deserialize};
 
 use crate::clean::{self, ItemId, RenderedLink, SelfTy};
 use crate::error::Error;
@@ -281,7 +281,7 @@ impl IndexItemFunctionType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StylePath {
     /// The path to the theme
     pub(crate) path: PathBuf,

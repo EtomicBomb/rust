@@ -1,9 +1,12 @@
+#![allow(dead_code)]
+
 use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
+use std::iter::once;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -13,7 +16,7 @@ use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_span::def_id::DefId;
 use rustc_span::Symbol;
 use serde::ser::SerializeSeq;
-use serde::{Serialize, Serializer};
+use serde::{Serialize, Deserialize, Serializer};
 
 use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
 use crate::clean::{Crate, Item, ItemId, ItemKind};
@@ -29,6 +32,169 @@ use crate::html::render::{AssocItemLink, ImplRenderingParameters};
 use crate::html::{layout, static_files};
 use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
+use crate::html::render::StylePath;
+
+struct FsEntry {
+    path: PathBuf, 
+    contents: Vec<u8>,
+}
+
+impl FsEntry {
+    fn new<P: Into<PathBuf>, C: Into<Vec<u8>>>(path: P, contents: C) -> FsEntry {
+        let path = path.into();
+        let contents = contents.into();
+        FsEntry { path, contents }
+    }
+}
+
+#[allow(dead_code)]
+trait Snip {
+    fn merge(&mut self, other: Self);
+    fn render(&mut self) -> impl Iterator<Item=FsEntry>;
+}
+
+
+#[derive(Serialize, Deserialize)]
+struct SearchIndexSnip {
+    all_indexes: Vec<String>,
+}
+
+impl Snip for SearchIndexSnip {
+    fn merge(&mut self, mut other: Self) {
+        self.all_indexes.append(&mut other.all_indexes);
+    }
+
+    /// Render search-index.js
+    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
+        self.all_indexes.sort_unstable();
+        let all_indexes = serde_json::to_string(&self.all_indexes).unwrap();
+        let all_indexes = format!(r"#\
+var searchIndex = new Map(JSON.parse('[\\\n{all_indexes}]'));
+if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
+else if (window.initSearch) window.initSearch(searchIndex);
+#");
+        once(FsEntry::new("search-index.js", all_indexes))
+    }
+}
+
+// krate.name(cx.tcx()).to_string()
+#[derive(Serialize, Deserialize)]
+struct CrateListSnip {
+    krates: Vec<String>,
+    page: layout::OwnedPage,
+    layout: layout::Layout,
+    style_files: Vec<StylePath>,
+}
+
+impl CrateListSnip {
+    fn new<'a>(krates: Vec<String>, context: &Context<'a>) -> Self {
+        let shared = Rc::clone(&context.shared);
+
+        let page = layout::Page {
+            title: "Index of crates",
+            css_class: "mod sys",
+            root_path: "./",
+            static_root_path: shared.static_root_path.as_deref(),
+            description: "List of crates",
+            resource_suffix: &shared.resource_suffix,
+            rust_logo: true,
+        };
+
+        let page = page.as_page();
+
+        let layout = shared.layout.clone();
+        let style_files = shared.style_files.clone();
+        CrateListSnip { krates, page, layout, style_files }
+    }
+}
+
+impl Snip for CrateListSnip {
+    fn merge(&mut self, mut other: Self) {
+        self.krates.append(&mut other.krates);
+    }
+
+    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
+        self.krates.sort_unstable();
+        let crates_js = once(FsEntry::new("crates.js", format!("window.ALL_CRATES = [{}];", self.krates.join(","))));
+
+        let content = format!(
+            "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
+            self.krates.iter().format_with("", |k, f| {
+                f(&format_args!(
+                    "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
+                    trailing_slash = ensure_trailing_slash(k),
+                ))
+            })
+        );
+        let index_html = layout::render(&self.layout, &self.page.as_page(), "", content, &self.style_files);
+        let index_html = once(FsEntry::new("index.html", index_html));
+        crates_js.chain(index_html)
+    }
+}
+
+struct TypeAliasSnip {
+    path: PathBuf,
+    aliases: Vec<String>,
+}
+
+impl Snip for TypeAliasSnip {
+    fn merge(&mut self, mut other: Self) {
+        assert_eq!(self.path, other.path);
+        self.aliases.append(&mut other.aliases);
+    }
+
+    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
+        self.aliases.sort_unstable();
+        let aliases = self.aliases.join(",");
+        let content = format!(r"#
+(function() {{
+    var type_impls = {{ {} }};
+    if (window.register_type_impls) {{
+        window.register_type_impls(type_impls);
+    }} else {{
+        window.pending_type_impls = type_impls;
+    }}
+}})();
+#", aliases);
+        once(FsEntry::new(&self.path, content))
+    }
+}
+
+struct TraitAliasSnip {
+    path: PathBuf,
+    implementors: Vec<String>,
+}
+
+impl Snip for TraitAliasSnip {
+    fn merge(&mut self, mut other: Self) {
+        self.implementors.append(&mut other.implementors);
+    }
+
+    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
+        self.implementors.sort_unstable();
+        let implementors = self.implementors.join(",");
+        let implementors = format!(r"#
+(function() {{
+    var implementors = {{ {} }};
+    if (window.register_implementors) {{
+        window.register_implementors(implementors);
+    }} else {{
+        window.pending_implementors = implementors;
+    }}
+}})();
+#", implementors);
+        once(FsEntry::new(&self.path, implementors))
+    }
+}
+
+pub(super) fn write_shared(
+    cx: &mut Context<'_>,
+    krate: &Crate,
+    search_index: SerializedSearchIndex,
+    options: &RenderOptions,
+) -> Result<(), Error> {
+    dump(cx, krate, search_index, options)
+}
 
 /// Rustdoc writes out two kinds of shared files:
 ///  - Static files, which are embedded in the rustdoc binary and are written with a
@@ -44,7 +210,7 @@ use crate::{try_err, try_none};
 ///    cache with `Cache-Control: immutable`. They include the contents of the
 ///    --resource-suffix flag and are emitted when --emit-type is empty (default)
 ///    or contains "invocation-specific".
-pub(super) fn write_shared(
+pub(super) fn dump(
     cx: &mut Context<'_>,
     krate: &Crate,
     search_index: SerializedSearchIndex,
@@ -313,6 +479,7 @@ pub(super) fn write_shared(
     let dst = cx.dst.join(&format!("search-index{}.js", cx.shared.resource_suffix));
     let (mut all_indexes, mut krates) =
         try_err!(collect_json(&dst, krate.name(cx.tcx()).as_str()), &dst);
+    dbg!(&search_index.index);
     all_indexes.push(search_index.index);
     krates.push(krate.name(cx.tcx()).to_string());
     krates.sort();
@@ -412,6 +579,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
     // this visitor works to reverse that: `aliased_types` is a map
     // from target to the aliases that reference it, and each one
     // will generate one file.
+
     struct TypeImplCollector<'cx, 'cache> {
         // Map from DefId-of-aliased-type to its data.
         aliased_types: IndexMap<DefId, AliasedType<'cache>>,
@@ -419,6 +587,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
         cache: &'cache Cache,
         cx: &'cache mut Context<'cx>,
     }
+
     // Data for an aliased type.
     //
     // In the final file, the format will be roughly:
@@ -434,6 +603,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
     // ]
     // )
     // ```
+
     struct AliasedType<'cache> {
         // This is used to generate the actual filename of this aliased type.
         target_fqp: &'cache [Symbol],
@@ -442,14 +612,17 @@ else if (window.initSearch) window.initSearch(searchIndex);
         // ItemId is used to deduplicate impls.
         impl_: IndexMap<ItemId, AliasedTypeImpl<'cache>>,
     }
+
     // The `impl_` contains data that's used to figure out if an alias will work,
     // and to generate the HTML at the end.
     //
     // The `type_aliases` list is built up with each type alias that matches.
+
     struct AliasedTypeImpl<'cache> {
         impl_: &'cache Impl,
         type_aliases: Vec<(&'cache [Symbol], Item)>,
     }
+
     impl<'cx, 'cache> DocVisitor for TypeImplCollector<'cx, 'cache> {
         fn visit_item(&mut self, it: &Item) {
             self.visit_item_recur(it);
@@ -521,12 +694,14 @@ else if (window.initSearch) window.initSearch(searchIndex);
             }
         }
     }
+
     let mut type_impl_collector = TypeImplCollector {
         aliased_types: IndexMap::default(),
         visited_aliases: FxHashSet::default(),
         cache,
         cx,
     };
+
     DocVisitor::visit_crate(&mut type_impl_collector, &krate);
     // Final serialized form of the alias impl
     struct AliasSerializableImpl {
@@ -534,6 +709,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
         trait_: Option<String>,
         aliases: Vec<String>,
     }
+
     impl Serialize for AliasSerializableImpl {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
@@ -552,6 +728,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
             seq.end()
         }
     }
+
     let cx = type_impl_collector.cx;
     let dst = cx.dst.join("type.impl");
     let aliased_types = type_impl_collector.aliased_types;
@@ -620,6 +797,15 @@ else if (window.initSearch) window.initSearch(searchIndex);
                 ret
             })
             .collect::<Vec<_>>();
+
+//        fn serialize_sorted<T: Serialize, I: IntoIterator<Item=T>>(ts: I) -> String {
+//            let mut impls = impls
+//                .iter()
+//                .map(|i| serde_json::to_string(i).expect("failed serde conversion"))
+//                .collect::<Vec<_>>();
+//            impls.sort();
+//            format!("[{}]", impls.join(","))
+//        }
 
         // FIXME: this fixes only rustdoc part of instability of trait impls
         // for js files, see #120371

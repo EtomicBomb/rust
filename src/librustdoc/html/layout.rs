@@ -7,10 +7,11 @@ use crate::html::format::{Buffer, Print};
 use crate::html::render::{ensure_trailing_slash, StylePath};
 
 use askama::Template;
+use serde::{Serialize, Deserialize};
 
 use super::static_files::{StaticFiles, STATIC_FILES};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Layout {
     pub(crate) logo: String,
     pub(crate) favicon: String,
@@ -25,6 +26,7 @@ pub(crate) struct Layout {
     pub(crate) scrape_examples_extension: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Page<'a> {
     pub(crate) title: &'a str,
     pub(crate) css_class: &'a str,
@@ -34,6 +36,48 @@ pub(crate) struct Page<'a> {
     pub(crate) resource_suffix: &'a str,
     pub(crate) rust_logo: bool,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct OwnedPage {
+    title: String,
+    css_class: String,
+    root_path: String,
+    static_root_path: Option<String>,
+    description: String,
+    resource_suffix: String,
+    rust_logo: bool,
+}
+
+// Implement Borrow for OwnedPage to borrow as a reference to Page
+impl OwnedPage {
+    pub(crate) fn as_page(&self) -> Page<'_> {
+        Page {
+            title: &self.title,
+            css_class: &self.css_class,
+            root_path: &self.root_path,
+            static_root_path: self.static_root_path.as_deref(),
+            description: &self.description,
+            resource_suffix: &self.resource_suffix,
+            rust_logo: self.rust_logo,
+        }
+    }
+}
+
+// Implement ToOwned for Page to convert a borrowed reference to OwnedPage
+impl<'a> Page<'a> {
+    pub(crate) fn as_page(self) -> OwnedPage {
+        OwnedPage {
+            title: self.title.to_string(),
+            css_class: self.css_class.to_string(),
+            root_path: self.root_path.to_string(),
+            static_root_path: self.static_root_path.map(|p| p.to_string()),
+            description: self.description.to_string(),
+            resource_suffix: self.resource_suffix.to_string(),
+            rust_logo: self.rust_logo,
+        }
+    }
+}
+
 
 impl<'a> Page<'a> {
     pub(crate) fn get_static_root_path(&self) -> String {
