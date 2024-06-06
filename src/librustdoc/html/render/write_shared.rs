@@ -7,6 +7,8 @@ use std::io::{self, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::iter::once;
+use std::fmt::{self, Display};
+use std::ops::Deref;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -47,16 +49,60 @@ impl FsEntry {
     }
 }
 
+//fn encode_sequence_inconsistant<T: Display, I: IntoIterator<Item=EncodedJson<T>>>(items: I) -> EncodedJson<String> {
+//    EncodedJson(format!("[{}]", items.into_iter().format(",")))
+//}
+
+//fn encode_map_inconsistent<K: Display, V: Display, I: IntoIterator<Item=(K, EncodedJson<V>)>>(items: I) -> EncodedJson<String> {
+//    EncodedJson(format!("{{{}}}", items.into_iter().format_with(",", |(k, v), f| f(&format_args!("{k}:{v}")))))
+//}
+
+#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
+struct EncodedJson<T>(T);
+impl<T> EncodedJson<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T: Deref> EncodedJson<T> {
+    fn as_deref(&self) -> EncodedJson<&<T as Deref>::Target> {
+        EncodedJson(self.0.deref())
+    }
+}
+
+impl<T: Display> Display for EncodedJson<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+fn encode_serializable<T: Serialize>(item: T) -> EncodedJson<String> {
+    EncodedJson(serde_json::to_string(&item).unwrap())
+}
+
+fn encode_sequence<T: Display + Ord, I: IntoIterator<Item=EncodedJson<T>>>(items: I) -> EncodedJson<String> {
+    let mut items: Vec<_> = items.into_iter().collect();
+    items.sort_unstable();
+    EncodedJson(format!("[{}]", items.into_iter().format(",")))
+}
+
+fn encode_map<K: Display + Ord, V: Display, I: IntoIterator<Item=(K, EncodedJson<V>)>>(items: I) -> EncodedJson<String> {
+    let mut items: Vec<_> = items.into_iter().map(|(k, v)| format!("{k}:{v}")).collect();
+    items.sort_unstable();
+    EncodedJson(format!("{{{}}}", items.into_iter().format(",")))
+}
+
 #[allow(dead_code)]
 trait Snip {
     fn merge(&mut self, other: Self);
-    fn render(&mut self) -> impl Iterator<Item=FsEntry>;
+    fn render(&self) -> impl Iterator<Item=FsEntry>;
 }
 
 
 #[derive(Serialize, Deserialize)]
 struct SearchIndexSnip {
-    all_indexes: Vec<String>,
+    all_indexes: Vec<EncodedJson<String>>,
 }
 
 impl Snip for SearchIndexSnip {
@@ -65,11 +111,10 @@ impl Snip for SearchIndexSnip {
     }
 
     /// Render search-index.js
-    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
-        self.all_indexes.sort_unstable();
-        let all_indexes = serde_json::to_string(&self.all_indexes).unwrap();
+    fn render(&self) -> impl Iterator<Item=FsEntry> {
+        let all_indexes = encode_sequence(self.all_indexes.iter().map(|e| e.as_deref()));
         let all_indexes = format!(r"#\
-var searchIndex = new Map(JSON.parse('[\\\n{all_indexes}]'));
+var searchIndex = new Map(JSON.parse('{all_indexes}'));
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);
 #");
@@ -113,9 +158,9 @@ impl Snip for CrateListSnip {
         self.krates.append(&mut other.krates);
     }
 
-    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
-        self.krates.sort_unstable();
-        let crates_js = once(FsEntry::new("crates.js", format!("window.ALL_CRATES = [{}];", self.krates.join(","))));
+    fn render(&self) -> impl Iterator<Item=FsEntry> {
+        let crates = encode_sequence(self.krates.iter().map(|krate| encode_serializable(krate)).collect::<Vec<_>>());
+        let crates_js = once(FsEntry::new("crates.js", format!("window.ALL_CRATES = {crates};")));
 
         let content = format!(
             "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
@@ -132,9 +177,23 @@ impl Snip for CrateListSnip {
     }
 }
 
+fn implementors_iife(impls: &str, register: &str, pending: &str, json: EncodedJson<&str>) -> String {
+    format!(r"#
+(function() {{
+    var {impls} = {json};
+    if (window.{register}) {{
+        window.{register}({impls});
+    }} else {{
+        window.{pending} = {impls};
+    }}
+}})();
+#")
+
+}
+
 struct TypeAliasSnip {
     path: PathBuf,
-    aliases: Vec<String>,
+    aliases: Vec<(EncodedJson<String>, EncodedJson<String>)>,
 }
 
 impl Snip for TypeAliasSnip {
@@ -143,26 +202,16 @@ impl Snip for TypeAliasSnip {
         self.aliases.append(&mut other.aliases);
     }
 
-    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
-        self.aliases.sort_unstable();
-        let aliases = self.aliases.join(",");
-        let content = format!(r"#
-(function() {{
-    var type_impls = {{ {} }};
-    if (window.register_type_impls) {{
-        window.register_type_impls(type_impls);
-    }} else {{
-        window.pending_type_impls = type_impls;
-    }}
-}})();
-#", aliases);
+    fn render(&self) -> impl Iterator<Item=FsEntry> {
+        let aliases = encode_map(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let content = implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref());
         once(FsEntry::new(&self.path, content))
     }
 }
 
 struct TraitAliasSnip {
     path: PathBuf,
-    implementors: Vec<String>,
+    implementors: Vec<(EncodedJson<String>, EncodedJson<String>)>,
 }
 
 impl Snip for TraitAliasSnip {
@@ -170,20 +219,10 @@ impl Snip for TraitAliasSnip {
         self.implementors.append(&mut other.implementors);
     }
 
-    fn render(&mut self) -> impl Iterator<Item=FsEntry> {
-        self.implementors.sort_unstable();
-        let implementors = self.implementors.join(",");
-        let implementors = format!(r"#
-(function() {{
-    var implementors = {{ {} }};
-    if (window.register_implementors) {{
-        window.register_implementors(implementors);
-    }} else {{
-        window.pending_implementors = implementors;
-    }}
-}})();
-#", implementors);
-        once(FsEntry::new(&self.path, implementors))
+    fn render(&self) -> impl Iterator<Item=FsEntry> {
+        let implementors = encode_map(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let content = implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref());
+        once(FsEntry::new(&self.path, content))
     }
 }
 
