@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::fs::{self, File, read_dir};
-use std::io::prelude::*;
-use std::io::{self, BufReader};
+use std::fs::{self, read_dir};
 use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::fmt::{self, Display};
 use std::ops::Deref;
+use std::ffi::OsString;
+
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -34,37 +34,108 @@ use crate::html::{layout, static_files};
 use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
 
+#[derive(Debug, Default)]
+struct Hierarchy {
+    parent: Weak<Self>,
+    elem: OsString,
+    children: RefCell<FxHashMap<OsString, Rc<Self>>>,
+    elems: RefCell<FxHashSet<OsString>>,
+}
 
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
-struct EncodedJson<T>(T);
+impl Hierarchy {
+    fn with_parent(elem: OsString, parent: &Rc<Self>) -> Self {
+        Self { elem, parent: Rc::downgrade(parent), ..Self::default() }
+    }
 
-impl<T: Deref> EncodedJson<T> {
-    fn as_deref(&self) -> EncodedJson<&<T as Deref>::Target> {
-        EncodedJson(self.0.deref())
+    fn to_json_string(&self) -> SortedJson<String> {
+        let subs = self.children.borrow();
+        let files = self.elems.borrow();
+        let name = SortedJson::serialize(self.elem.to_str().expect("invalid osstring conversion"));
+        let mut out = Vec::from([name]);
+        if !subs.is_empty() || !files.is_empty() {
+            let subs = subs.iter().map(|(_, s)| s.to_json_string());
+            out.push(SortedJson::array(subs));
+        }
+        if !files.is_empty() {
+            let files = files.iter().map(|s| SortedJson::serialize(s.to_str().expect("invalid osstring")));
+            out.push(SortedJson::array(files));
+        }
+        SortedJson::array(out)
+    }
+
+    // subs empty, files empty - [name]
+    // subs empty, files full - [name, subs, files]
+    // subs full, files empty - [name, subs]
+    // subs full, files full - [name, subs, files]
+
+    fn add_path(self: &Rc<Self>, path: &Path) {
+        let mut h = Rc::clone(&self);
+        let mut elems = path
+            .components()
+            .filter_map(|s| match s {
+                Component::Normal(s) => Some(s.to_owned()),
+                Component::ParentDir => Some(OsString::from("..")),
+                _ => None,
+            })
+            .peekable();
+        loop {
+            let cur_elem = elems.next().expect("empty file path");
+            if cur_elem == ".." {
+                if let Some(parent) = h.parent.upgrade() {
+                    h = parent;
+                }
+                continue;
+            }
+            if elems.peek().is_none() {
+                h.elems.borrow_mut().insert(cur_elem);
+                break;
+            } else {
+                let entry = Rc::clone(
+                    h.children
+                        .borrow_mut()
+                        .entry(cur_elem.clone())
+                        .or_insert_with(|| Rc::new(Self::with_parent(cur_elem, &h))),
+                );
+                h = entry;
+            }
+        }
     }
 }
 
-impl<T: Display> Display for EncodedJson<T> {
+
+#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
+struct SortedJson<T>(T);
+
+impl<T: Deref> SortedJson<T> {
+    fn as_deref(&self) -> SortedJson<&<T as Deref>::Target> {
+        SortedJson(self.0.deref())
+    }
+}
+
+impl<T: Display> Display for SortedJson<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-fn encode_serializable<T: Serialize>(item: T) -> EncodedJson<String> {
-    EncodedJson(serde_json::to_string(&item).unwrap())
+impl SortedJson<String> {
+    fn serialize<T: Serialize>(item: T) -> Self {
+        SortedJson(serde_json::to_string(&item).unwrap())
+    }
+
+    fn array<T: Display + Ord, I: IntoIterator<Item=SortedJson<T>>>(items: I) -> Self {
+        let mut items: Vec<_> = items.into_iter().collect();
+        items.sort_unstable();
+        SortedJson(format!("[{}]", items.into_iter().format(",")))
+    }
+
+    fn object<K: Display, V: Display, I: IntoIterator<Item=(K, SortedJson<V>)>>(items: I) -> Self {
+        let mut items: Vec<String> = items.into_iter().map(|(k, v)| format!("{k}:{v}")).collect();
+        items.sort_unstable();
+        SortedJson(format!("{{{}}}", items.into_iter().format(",")))
+    }
 }
 
-fn encode_sequence<T: Display + Ord, I: IntoIterator<Item=EncodedJson<T>>>(items: I) -> EncodedJson<String> {
-    let mut items: Vec<_> = items.into_iter().collect();
-    items.sort_unstable();
-    EncodedJson(format!("[{}]", items.into_iter().format(",")))
-}
-
-fn encode_map<K: Display, V: Display, I: IntoIterator<Item=(K, EncodedJson<V>)>>(items: I) -> EncodedJson<String> {
-    let mut items: Vec<String> = items.into_iter().map(|(k, v)| format!("{k}:{v}")).collect();
-    items.sort_unstable();
-    EncodedJson(format!("{{{}}}", items.into_iter().format(",")))
-}
 
 #[allow(dead_code)]
 trait Snip: Serialize + Default + for <'a> Deserialize<'a> {
@@ -100,8 +171,43 @@ fn merge_snips<S: Snip>(dst: &Path) -> Result<S, Error> {
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
+struct SourcesSnip {
+    sources: Vec<SortedJson<String>>,
+}
+
+impl SourcesSnip {
+    fn new(crate_name: SortedJson<&str>, hierarchy: &Hierarchy) -> SourcesSnip {
+        let hierarchy = hierarchy.to_json_string();
+        let sources = Vec::from([SortedJson::array([crate_name, hierarchy.as_deref()])]);
+        SourcesSnip { sources }
+    }
+}
+
+impl Snip for SourcesSnip {
+    const NAME: &'static str = "sources";
+    fn merge(&mut self, mut other: Self) {
+        self.sources.append(&mut other.sources);
+    }
+
+    /// Render search-index.js
+    fn render(&self, _shared: &SharedContext<'_>) -> String {
+        let sources = SortedJson::array(self.sources.iter().map(|e| e.as_deref()));
+        // This needs to be `var`, not `const`.
+        // This variable needs declared in the current global scope so that if
+        // src-script.js loads first, it can pick it up.
+        format!("var srcIndex = new Map({sources}); createSrcSidebar();")
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct SearchIndexSnip {
-    all_indexes: Vec<EncodedJson<String>>,
+    all_indexes: Vec<SortedJson<String>>,
+}
+
+impl SearchIndexSnip {
+    fn new(index: &str) -> Self {
+        Self { all_indexes: Vec::from([SortedJson::serialize(index)]) }
+    }
 }
 
 impl Snip for SearchIndexSnip {
@@ -112,7 +218,7 @@ impl Snip for SearchIndexSnip {
 
     /// Render search-index.js
     fn render(&self, _shared: &SharedContext<'_>) -> String {
-        let all_indexes = encode_sequence(self.all_indexes.iter().map(|e| e.as_deref()));
+        let all_indexes = SortedJson::array(self.all_indexes.iter().map(|e| e.as_deref()));
         format!(r"#\
 var searchIndex = new Map(JSON.parse('{all_indexes}'));
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
@@ -122,8 +228,36 @@ else if (window.initSearch) window.initSearch(searchIndex);
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
+struct SearchDescriptionSnip {
+    descs: Vec<SortedJson<String>>,
+}
+
+impl Snip for SearchDescriptionSnip {
+    const NAME: &'static str = "search-index";
+    fn merge(&mut self, mut other: Self) {
+        self.descs.append(&mut other.descs);
+    }
+
+    /// render a search description shard
+    fn render(&self, _shared: &SharedContext<'_>) -> String {
+        todo!() 
+    }
+}
+
+fn render(snip: &SearchDescriptionSnip, shard: usize, crate_name: SortedJson<&str>) -> String {
+    let data = SortedJson::array(snip.descs.iter().map(|e| e.as_deref()));
+    format!("searchState.loadedDescShard({crate_name}, {shard}, {data})")
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct AllCratesSnip {
     crates: Vec<String>,
+}
+
+impl AllCratesSnip {
+    fn new(crate_name: String) -> AllCratesSnip {
+        AllCratesSnip { crates: Vec::from([crate_name]) }
+    }
 }
 
 impl Snip for AllCratesSnip {
@@ -133,7 +267,7 @@ impl Snip for AllCratesSnip {
     }
 
     fn render(&self, _shared: &SharedContext<'_>) -> String {
-        let crates = encode_sequence(self.crates.iter().map(|krate| encode_serializable(krate)).collect::<Vec<_>>());
+        let crates = SortedJson::array(self.crates.iter().map(|krate| SortedJson::serialize(krate)).collect::<Vec<_>>());
         format!("window.ALL_CRATES = {crates};")
     }
 }
@@ -164,7 +298,7 @@ impl AllCratesSnip {
     }
 }
 
-fn implementors_iife(impls: &str, register: &str, pending: &str, json: EncodedJson<&str>) -> String {
+fn implementors_iife(impls: &str, register: &str, pending: &str, json: SortedJson<&str>) -> String {
     format!(r"#
 (function() {{
     var {impls} = {json};
@@ -179,7 +313,7 @@ fn implementors_iife(impls: &str, register: &str, pending: &str, json: EncodedJs
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 struct TypeAliasSnip {
-    aliases: Vec<(EncodedJson<String>, EncodedJson<String>)>,
+    aliases: Vec<(SortedJson<String>, SortedJson<String>)>,
 }
 
 impl Snip for TypeAliasSnip {
@@ -189,14 +323,14 @@ impl Snip for TypeAliasSnip {
     }
 
     fn render(&self, _shared: &SharedContext<'_>) -> String {
-        let aliases = encode_map(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let aliases = SortedJson::object(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref())
     }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 struct TraitAliasSnip {
-    implementors: Vec<(EncodedJson<String>, EncodedJson<String>)>,
+    implementors: Vec<(SortedJson<String>, SortedJson<String>)>,
 }
 
 impl Snip for TraitAliasSnip {
@@ -206,7 +340,7 @@ impl Snip for TraitAliasSnip {
     }
 
     fn render(&self, _shared: &SharedContext<'_>) -> String {
-        let implementors = encode_map(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let implementors = SortedJson::object(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref())
     }
 }
@@ -244,8 +378,9 @@ pub(super) fn dump(
     // docs placed in the output directory, so this needs to be a synchronized
     // operation with respect to all other rustdocs running around.
 
-    let crate_name = encode_serializable(krate.name(cx.tcx()).as_str());
-    let invocation = InvocationIdentifier(krate.name(cx.tcx()).to_string());
+    let crate_name = krate.name(cx.tcx()).to_string();
+    let encoded_crate_name = SortedJson::serialize(crate_name.clone());
+    let invocation = InvocationIdentifier(crate_name.clone());
 
     let lock_file = cx.dst.join(".lock");
     let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
@@ -298,128 +433,6 @@ pub(super) fn dump(
         })?;
     }
 
-    /// Read a file and return all lines that match the <code>"{crate}":{data},\ </code> format,
-    /// and return a tuple `(Vec<DataString>, Vec<CrateNameString>)`.
-    ///
-    /// This forms the payload of files that look like this:
-    ///
-    /// ```javascript
-    /// var data = JSON.parse('{\
-    /// "{crate1}":{data},\
-    /// "{crate2}":{data}\
-    /// }');
-    /// use_data(data);
-    /// ```
-    ///
-    /// The file needs to be formatted so that *only crate data lines start with `"`*.
-    fn collect_json(path: &Path, krate: &str) -> io::Result<(Vec<String>, Vec<String>)> {
-        let mut ret = Vec::new();
-        let mut krates = Vec::new();
-
-        if path.exists() {
-            let prefix = format!("[\"{krate}\"");
-            for line in BufReader::new(File::open(path)?).lines() {
-                let line = line?;
-                if !line.starts_with("[\"") {
-                    continue;
-                }
-                if line.starts_with(&prefix) {
-                    continue;
-                }
-                if line.ends_with("],\\") {
-                    ret.push(line[..line.len() - 2].to_string());
-                } else {
-                    // Ends with "\\" (it's the case for the last added crate line)
-                    ret.push(line[..line.len() - 1].to_string());
-                }
-                krates.push(
-                    line[1..] // We skip the `[` parent at the beginning of the line.
-                        .split('"')
-                        .find(|s| !s.is_empty())
-                        .map(|s| s.to_owned())
-                        .unwrap_or_else(String::new),
-                );
-            }
-        }
-        Ok((ret, krates))
-    }
-
-    use std::ffi::OsString;
-
-    #[derive(Debug, Default)]
-    struct Hierarchy {
-        parent: Weak<Self>,
-        elem: OsString,
-        children: RefCell<FxHashMap<OsString, Rc<Self>>>,
-        elems: RefCell<FxHashSet<OsString>>,
-    }
-
-    impl Hierarchy {
-        fn with_parent(elem: OsString, parent: &Rc<Self>) -> Self {
-            Self { elem, parent: Rc::downgrade(parent), ..Self::default() }
-        }
-
-        fn to_json_string(&self) -> String {
-            let borrow = self.children.borrow();
-            let mut subs: Vec<_> = borrow.values().collect();
-            subs.sort_unstable_by(|a, b| a.elem.cmp(&b.elem));
-            let mut files = self
-                .elems
-                .borrow()
-                .iter()
-                .map(|s| format!("\"{}\"", s.to_str().expect("invalid osstring conversion")))
-                .collect::<Vec<_>>();
-            files.sort_unstable();
-            let subs = subs.iter().map(|s| s.to_json_string()).collect::<Vec<_>>().join(",");
-            let dirs = if subs.is_empty() && files.is_empty() {
-                String::new()
-            } else {
-                format!(",[{subs}]")
-            };
-            let files = files.join(",");
-            let files = if files.is_empty() { String::new() } else { format!(",[{files}]") };
-            format!(
-                "[\"{name}\"{dirs}{files}]",
-                name = self.elem.to_str().expect("invalid osstring conversion"),
-                dirs = dirs,
-                files = files
-            )
-        }
-
-        fn add_path(self: &Rc<Self>, path: &Path) {
-            let mut h = Rc::clone(&self);
-            let mut elems = path
-                .components()
-                .filter_map(|s| match s {
-                    Component::Normal(s) => Some(s.to_owned()),
-                    Component::ParentDir => Some(OsString::from("..")),
-                    _ => None,
-                })
-                .peekable();
-            loop {
-                let cur_elem = elems.next().expect("empty file path");
-                if cur_elem == ".." {
-                    if let Some(parent) = h.parent.upgrade() {
-                        h = parent;
-                    }
-                    continue;
-                }
-                if elems.peek().is_none() {
-                    h.elems.borrow_mut().insert(cur_elem);
-                    break;
-                } else {
-                    let entry = Rc::clone(
-                        h.children
-                            .borrow_mut()
-                            .entry(cur_elem.clone())
-                            .or_insert_with(|| Rc::new(Self::with_parent(cur_elem, &h))),
-                    );
-                    h = entry;
-                }
-            }
-        }
-    }
-
     if cx.include_sources {
         let hierarchy = Rc::new(Hierarchy::default());
         for source in cx
@@ -430,69 +443,38 @@ pub(super) fn dump(
         {
             hierarchy.add_path(source);
         }
-        let hierarchy = Rc::try_unwrap(hierarchy).unwrap();
-        let dst = cx.dst.join(&format!("src-files{}.js", cx.shared.resource_suffix));
-        let make_sources = || {
-            let (mut all_sources, _krates) =
-                try_err!(collect_json(&dst, krate.name(cx.tcx()).as_str()), &dst);
-            all_sources.push(format!(
-                r#"["{}",{}]"#,
-                &krate.name(cx.tcx()),
-                hierarchy
-                    .to_json_string()
-                    // All these `replace` calls are because we have to go through JS string for JSON content.
-                    .replace('\\', r"\\")
-                    .replace('\'', r"\'")
-                    // We need to escape double quotes for the JSON.
-                    .replace("\\\"", "\\\\\"")
-            ));
-            all_sources.sort();
-            // This needs to be `var`, not `const`.
-            // This variable needs declared in the current global scope so that if
-            // src-script.js loads first, it can pick it up.
-            let mut v = String::from("var srcIndex = new Map(JSON.parse('[\\\n");
-            v.push_str(&all_sources.join(",\\\n"));
-            v.push_str("\\\n]'));\ncreateSrcSidebar();\n");
-            Ok(v.into_bytes())
-        };
-        write_invocation_specific("src-files.js", &make_sources)?;
+
+        
+        let dst = cx.dst.join("src-files.js"); // TODO: invocation specific
+        let sources = SourcesSnip::new(encoded_crate_name.as_deref(), &hierarchy);
+        cx.shared.fs.write(snip_dst(&dst, &invocation), serde_json::to_string(&sources).unwrap())?;
+        let sources = merge_snips::<SourcesSnip>(&dst)?; 
+        write_invocation_specific("src-files.js", &|| {
+            Ok(sources.render(&cx.shared).into_bytes())
+        })?;
     }
 
-    // Update the search index and crate list.
-    let dst = cx.dst.join(&format!("search-index{}.js", cx.shared.resource_suffix));
-    let (mut all_indexes, mut krates) =
-        try_err!(collect_json(&dst, krate.name(cx.tcx()).as_str()), &dst);
-    dbg!(&search_index.index);
-    all_indexes.push(search_index.index);
-    krates.push(krate.name(cx.tcx()).to_string());
-    krates.sort();
+    // TODO: append to tree instead of creating a subdirectory
 
-    // Sort the indexes by crate so the file will be generated identically even
-    // with rustdoc running in parallel.
-    all_indexes.sort();
+    // Update the search index and crate list.
+    let SerializedSearchIndex { index, desc } = search_index;
+
+    let dst = cx.dst.join("search-index.js");
+    let index = SearchIndexSnip::new(&index);
+    cx.shared.fs.write(snip_dst(&dst, &invocation), serde_json::to_string(&index).unwrap())?;
+    let index = merge_snips::<SearchIndexSnip>(&dst)?; 
     write_invocation_specific("search-index.js", &|| {
-        // This needs to be `var`, not `const`.
-        // This variable needs declared in the current global scope so that if
-        // search.js loads first, it can pick it up.
-        let mut v = String::from("var searchIndex = new Map(JSON.parse('[\\\n");
-        v.push_str(&all_indexes.join(",\\\n"));
-        v.push_str(
-            r#"\
-]'));
-if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
-else if (window.initSearch) window.initSearch(searchIndex);
-"#,
-        );
-        Ok(v.into_bytes())
+        Ok(index.render(&cx.shared).into_bytes())
     })?;
 
+    // NOTE: this is fine because it odesn't write to a shared directory
     let search_desc_dir = cx.dst.join(format!("search.desc/{krate}", krate = krate.name(cx.tcx())));
     if Path::new(&search_desc_dir).exists() {
         try_err!(std::fs::remove_dir_all(&search_desc_dir), &search_desc_dir);
     }
     try_err!(std::fs::create_dir_all(&search_desc_dir), &search_desc_dir);
     let kratename = krate.name(cx.tcx()).to_string();
-    for (i, (_, data)) in search_index.desc.into_iter().enumerate() {
+    for (i, (_, data)) in desc.into_iter().enumerate() {
         let output_filename = static_files::suffix_path(
             &format!("{kratename}-desc-{i}-.js"),
             &cx.shared.resource_suffix,
@@ -502,8 +484,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
             std::fs::write(
                 &path,
                 &format!(
-                    r##"searchState.loadedDescShard({kratename}, {i}, {data})"##,
-                    kratename = serde_json::to_string(&kratename).unwrap(),
+                    r##"searchState.loadedDescShard({encoded_crate_name}, {i}, {data})"##,
                     data = serde_json::to_string(&data).unwrap(),
                 )
                 .into_bytes()
@@ -513,7 +494,8 @@ else if (window.initSearch) window.initSearch(searchIndex);
     }
 
     let dst_index = cx.dst.join("index.html");
-    cx.shared.fs.write(snip_dst(&dst_index, &invocation), serde_json::to_string(&crate_name).unwrap())?; // TODO: probably need to wrap it in ALlCratesSnip
+    let all_crates = AllCratesSnip::new(crate_name.clone());
+    cx.shared.fs.write(snip_dst(&dst_index, &invocation), serde_json::to_string(&all_crates).unwrap())?;
     let all_crates = merge_snips::<AllCratesSnip>(&dst_index)?; // TODO: snip_dst needs to append a file
     // TODO: need write and merge to avoid reading our own writess
     // TODO: consider how to clean up these files
@@ -768,8 +750,8 @@ else if (window.initSearch) window.initSearch(searchIndex);
         // FIXME: this fixes only rustdoc part of instability of trait impls
         // for js files, see #120371
         // Manually collect to string and sort to make list not depend on order
-        let impls = encode_sequence(impls.iter().map(encode_serializable).collect::<Vec<_>>());
-        let impls = encode_map([(crate_name.as_deref(), impls)]);
+        let impls = SortedJson::array(impls.iter().map(SortedJson::serialize).collect::<Vec<_>>());
+        let impls = SortedJson::object([(encoded_crate_name.as_deref(), impls)]);
 
         let mut mydst = dst.clone();
         for part in &aliased_type.target_fqp[..aliased_type.target_fqp.len() - 1] {
@@ -863,13 +845,8 @@ else if (window.initSearch) window.initSearch(searchIndex);
         // FIXME: this fixes only rustdoc part of instability of trait impls
         // for js files, see #120371
         // Manually collect to string and sort to make list not depend on order
-        let mut implementors = implementors
-            .iter()
-            .map(|i| serde_json::to_string(i).expect("failed serde conversion"))
-            .collect::<Vec<_>>();
-        implementors.sort();
-
-        let implementors = format!(r#""{}":[{}]"#, krate.name(cx.tcx()), implementors.join(","));
+        let implementors = SortedJson::array(implementors.iter().map(SortedJson::serialize).collect::<Vec<_>>());
+        let implementors = SortedJson::object([(encoded_crate_name.as_deref(), implementors)]);
 
         let mut mydst = dst.clone();
         for part in &remote_path[..remote_path.len() - 1] {
