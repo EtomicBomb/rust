@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::fs::{self, File};
+use std::fs::{self, File, read_dir};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::path::{Component, Path, PathBuf};
@@ -19,7 +19,7 @@ use rustc_span::Symbol;
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Deserialize, Serializer};
 
-use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
+use super::{collect_paths_for_type, ensure_trailing_slash, Context, SharedContext, RenderMode};
 use crate::clean::{Crate, Item, ItemId, ItemKind};
 use crate::config::{EmitType, RenderOptions};
 use crate::docfs::PathError;
@@ -33,7 +33,7 @@ use crate::html::render::{AssocItemLink, ImplRenderingParameters};
 use crate::html::{layout, static_files};
 use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
-use crate::html::render::StylePath;
+
 
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 struct EncodedJson<T>(T);
@@ -60,31 +60,58 @@ fn encode_sequence<T: Display + Ord, I: IntoIterator<Item=EncodedJson<T>>>(items
     EncodedJson(format!("[{}]", items.into_iter().format(",")))
 }
 
-fn encode_map<K: Display + Ord, V: Display, I: IntoIterator<Item=(K, EncodedJson<V>)>>(items: I) -> EncodedJson<String> {
-    let mut items: Vec<_> = items.into_iter().map(|(k, v)| format!("{k}:{v}")).collect();
+fn encode_map<K: Display, V: Display, I: IntoIterator<Item=(K, EncodedJson<V>)>>(items: I) -> EncodedJson<String> {
+    let mut items: Vec<String> = items.into_iter().map(|(k, v)| format!("{k}:{v}")).collect();
     items.sort_unstable();
     EncodedJson(format!("{{{}}}", items.into_iter().format(",")))
 }
 
 #[allow(dead_code)]
-trait Snip {
+trait Snip: Serialize + Default + for <'a> Deserialize<'a> {
+    const NAME: &'static str;
     fn merge(&mut self, other: Self);
-    fn render(&self) -> String;
+    /// It is very annoying that this takes the shared context. It is only used in the crate list,
+    /// because it renders an entire page based off of whatever the layout and style files are
+    /// present.
+    fn render(&self, shared: &SharedContext<'_>) -> String;
 }
 
+struct InvocationIdentifier(String);
 
-#[derive(Serialize, Deserialize)]
+fn snip_dst(dst: &Path, invocation: &InvocationIdentifier) -> PathBuf {
+    [dst, Path::new("snips"), Path::new(&invocation.0)].into_iter().collect()
+}
+
+fn merge_snips<S: Snip>(dst: &Path) -> Result<S, Error> {
+    let dst = dst.join("snips");
+    let snips = try_err!(read_dir(&dst), &dst)
+        .map(|snip_path| {
+            let snip_path = try_err!(snip_path, &dst); // TODO: better error
+            let snip_path = snip_path.path();
+            let snip = try_err!(fs::read(&snip_path), &snip_path);
+            let snip = try_err!(serde_json::from_slice(&snip), &snip_path);
+            Ok::<S, Error>(snip)
+        })
+        .try_fold(S::default(), |mut snips, snip| {
+            snips.merge(snip?);
+            Ok(snips)
+        })?;
+    Ok(snips)
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct SearchIndexSnip {
     all_indexes: Vec<EncodedJson<String>>,
 }
 
 impl Snip for SearchIndexSnip {
+    const NAME: &'static str = "search-index";
     fn merge(&mut self, mut other: Self) {
         self.all_indexes.append(&mut other.all_indexes);
     }
 
     /// Render search-index.js
-    fn render(&self) -> String {
+    fn render(&self, _shared: &SharedContext<'_>) -> String {
         let all_indexes = encode_sequence(self.all_indexes.iter().map(|e| e.as_deref()));
         format!(r"#\
 var searchIndex = new Map(JSON.parse('{all_indexes}'));
@@ -94,38 +121,25 @@ else if (window.initSearch) window.initSearch(searchIndex);
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct AllCratesSnip {
-    krates: Vec<String>,
-    page: layout::OwnedPage,
-    layout: layout::Layout,
-    style_files: Vec<StylePath>,
+    crates: Vec<String>,
 }
 
 impl Snip for AllCratesSnip {
+    const NAME: &'static str = "all-crates";
     fn merge(&mut self, mut other: Self) {
-        self.krates.append(&mut other.krates);
+        self.crates.append(&mut other.crates);
     }
 
-    fn render(&self) -> String {
-        let crates = encode_sequence(self.krates.iter().map(|krate| encode_serializable(krate)).collect::<Vec<_>>());
+    fn render(&self, _shared: &SharedContext<'_>) -> String {
+        let crates = encode_sequence(self.crates.iter().map(|krate| encode_serializable(krate)).collect::<Vec<_>>());
         format!("window.ALL_CRATES = {crates};")
     }
 }
 
-// krate.name(cx.tcx()).to_string()
-#[derive(Serialize, Deserialize)]
-struct CrateListSnip {
-    krates: Vec<String>,
-    page: layout::OwnedPage,
-    layout: layout::Layout,
-    style_files: Vec<StylePath>,
-}
-
-impl CrateListSnip {
-    fn new<'a>(krates: Vec<String>, context: &Context<'a>) -> Self {
-        let shared = Rc::clone(&context.shared);
-
+impl AllCratesSnip {
+    fn render_crates_index(&self, shared: &SharedContext<'_>) -> String {
         let page = layout::Page {
             title: "Index of crates",
             css_class: "mod sys",
@@ -135,31 +149,18 @@ impl CrateListSnip {
             resource_suffix: &shared.resource_suffix,
             rust_logo: true,
         };
-
-        let page = page.as_page();
-
-        let layout = shared.layout.clone();
-        let style_files = shared.style_files.clone();
-        CrateListSnip { krates, page, layout, style_files }
-    }
-}
-
-impl Snip for CrateListSnip {
-    fn merge(&mut self, mut other: Self) {
-        self.krates.append(&mut other.krates);
-    }
-
-    fn render(&self) -> String {
+        let layout = &shared.layout;
+        let style_files = &shared.style_files;
         let content = format!(
             "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
-            self.krates.iter().format_with("", |k, f| {
+            self.crates.iter().format_with("", |k, f| {
                 f(&format_args!(
                     "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
                     trailing_slash = ensure_trailing_slash(k),
                 ))
             })
         );
-        layout::render(&self.layout, &self.page.as_page(), "", content, &self.style_files)
+        layout::render(layout, &page, "", content, &style_files)
     }
 }
 
@@ -174,34 +175,37 @@ fn implementors_iife(impls: &str, register: &str, pending: &str, json: EncodedJs
     }}
 }})();
 #")
-
 }
 
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct TypeAliasSnip {
     aliases: Vec<(EncodedJson<String>, EncodedJson<String>)>,
 }
 
 impl Snip for TypeAliasSnip {
+    const NAME: &'static str = "type-alias";
     fn merge(&mut self, mut other: Self) {
         self.aliases.append(&mut other.aliases);
     }
 
-    fn render(&self) -> String {
+    fn render(&self, _shared: &SharedContext<'_>) -> String {
         let aliases = encode_map(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref())
     }
 }
 
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct TraitAliasSnip {
     implementors: Vec<(EncodedJson<String>, EncodedJson<String>)>,
 }
 
 impl Snip for TraitAliasSnip {
+    const NAME: &'static str = "trait-alias";
     fn merge(&mut self, mut other: Self) {
         self.implementors.append(&mut other.implementors);
     }
 
-    fn render(&self) -> String {
+    fn render(&self, _shared: &SharedContext<'_>) -> String {
         let implementors = encode_map(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref())
     }
@@ -239,6 +243,10 @@ pub(super) fn dump(
     // Write out the shared files. Note that these are shared among all rustdoc
     // docs placed in the output directory, so this needs to be a synchronized
     // operation with respect to all other rustdocs running around.
+
+    let crate_name = encode_serializable(krate.name(cx.tcx()).as_str());
+    let invocation = InvocationIdentifier(krate.name(cx.tcx()).to_string());
+
     let lock_file = cx.dst.join(".lock");
     let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
 
@@ -288,51 +296,6 @@ pub(super) fn dump(
             let filename = static_dir.join(f.output_filename());
             cx.shared.fs.write(filename, f.minified())
         })?;
-    }
-
-    /// Read a file and return all lines that match the `"{crate}":{data},` format,
-    /// and return a tuple `(Vec<DataString>, Vec<CrateNameString>)`.
-    ///
-    /// This forms the payload of files that look like this:
-    ///
-    /// ```javascript
-    /// var data = {
-    /// "{crate1}":{data},
-    /// "{crate2}":{data}
-    /// };
-    /// use_data(data);
-    /// ```
-    ///
-    /// The file needs to be formatted so that *only crate data lines start with `"`*.
-    fn collect(path: &Path, krate: &str) -> io::Result<(Vec<String>, Vec<String>)> {
-        let mut ret = Vec::new();
-        let mut krates = Vec::new();
-
-        if path.exists() {
-            let prefix = format!("\"{krate}\"");
-            for line in BufReader::new(File::open(path)?).lines() {
-                let line = line?;
-                if !line.starts_with('"') {
-                    continue;
-                }
-                if line.starts_with(&prefix) {
-                    continue;
-                }
-                if line.ends_with(',') {
-                    ret.push(line[..line.len() - 1].to_string());
-                } else {
-                    // No comma (it's the case for the last added crate line)
-                    ret.push(line.to_string());
-                }
-                krates.push(
-                    line.split('"')
-                        .find(|s| !s.is_empty())
-                        .map(|s| s.to_owned())
-                        .unwrap_or_else(String::new),
-                );
-            }
-        }
-        Ok((ret, krates))
     }
 
     /// Read a file and return all lines that match the <code>"{crate}":{data},\ </code> format,
@@ -549,10 +512,11 @@ else if (window.initSearch) window.initSearch(searchIndex);
         );
     }
 
-    write_invocation_specific("crates.js", &|| {
-        let krates = krates.iter().map(|k| format!("\"{k}\"")).join(",");
-        Ok(format!("window.ALL_CRATES = [{krates}];").into_bytes())
-    })?;
+    let dst_index = cx.dst.join("index.html");
+    cx.shared.fs.write(snip_dst(&dst_index, &invocation), serde_json::to_string(&crate_name).unwrap())?; // TODO: probably need to wrap it in ALlCratesSnip
+    let all_crates = merge_snips::<AllCratesSnip>(&dst_index)?; // TODO: snip_dst needs to append a file
+    // TODO: need write and merge to avoid reading our own writess
+    // TODO: consider how to clean up these files
 
     if options.enable_index_page {
         if let Some(index_page) = options.index_page.clone() {
@@ -563,31 +527,14 @@ else if (window.initSearch) window.initSearch(searchIndex);
             crate::markdown::render(&index_page, md_opts, cx.shared.edition())
                 .map_err(|e| Error::new(e, &index_page))?;
         } else {
-            let shared = Rc::clone(&cx.shared);
-            let dst = cx.dst.join("index.html");
-            let page = layout::Page {
-                title: "Index of crates",
-                css_class: "mod sys",
-                root_path: "./",
-                static_root_path: shared.static_root_path.as_deref(),
-                description: "List of crates",
-                resource_suffix: &shared.resource_suffix,
-                rust_logo: true,
-            };
-
-            let content = format!(
-                "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
-                krates.iter().format_with("", |k, f| {
-                    f(&format_args!(
-                        "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
-                        trailing_slash = ensure_trailing_slash(k),
-                    ))
-                })
-            );
-            let v = layout::render(&shared.layout, &page, "", content, &shared.style_files);
-            shared.fs.write(dst, v)?;
+            let crates_index = all_crates.render_crates_index(&cx.shared);
+            cx.shared.fs.write(dst_index, crates_index)?;
         }
     }
+
+    write_invocation_specific("crates.js", &|| {
+        Ok(all_crates.render(&cx.shared).into())
+    })?;
 
     let cloned_shared = Rc::clone(&cx.shared);
     let cache = &cloned_shared.cache;
@@ -818,25 +765,11 @@ else if (window.initSearch) window.initSearch(searchIndex);
             })
             .collect::<Vec<_>>();
 
-//        fn serialize_sorted<T: Serialize, I: IntoIterator<Item=T>>(ts: I) -> String {
-//            let mut impls = impls
-//                .iter()
-//                .map(|i| serde_json::to_string(i).expect("failed serde conversion"))
-//                .collect::<Vec<_>>();
-//            impls.sort();
-//            format!("[{}]", impls.join(","))
-//        }
-
         // FIXME: this fixes only rustdoc part of instability of trait impls
         // for js files, see #120371
         // Manually collect to string and sort to make list not depend on order
-        let mut impls = impls
-            .iter()
-            .map(|i| serde_json::to_string(i).expect("failed serde conversion"))
-            .collect::<Vec<_>>();
-        impls.sort();
-
-        let impls = format!(r#""{}":[{}]"#, krate.name(cx.tcx()), impls.join(","));
+        let impls = encode_sequence(impls.iter().map(encode_serializable).collect::<Vec<_>>());
+        let impls = encode_map([(crate_name.as_deref(), impls)]);
 
         let mut mydst = dst.clone();
         for part in &aliased_type.target_fqp[..aliased_type.target_fqp.len() - 1] {
@@ -844,29 +777,15 @@ else if (window.initSearch) window.initSearch(searchIndex);
         }
         cx.shared.ensure_dir(&mydst)?;
         let aliased_item_type = aliased_type.target_type;
+
         mydst.push(&format!(
             "{aliased_item_type}.{}.js",
             aliased_type.target_fqp[aliased_type.target_fqp.len() - 1]
         ));
 
-        let (mut all_impls, _) = try_err!(collect(&mydst, krate.name(cx.tcx()).as_str()), &mydst);
-        all_impls.push(impls);
-        // Sort the implementors by crate so the file will be generated
-        // identically even with rustdoc running in parallel.
-        all_impls.sort();
-
-        let mut v = String::from("(function() {var type_impls = {\n");
-        v.push_str(&all_impls.join(",\n"));
-        v.push_str("\n};");
-        v.push_str(
-            "if (window.register_type_impls) {\
-                 window.register_type_impls(type_impls);\
-             } else {\
-                 window.pending_type_impls = type_impls;\
-             }",
-        );
-        v.push_str("})()");
-        cx.shared.fs.write(mydst, v)?;
+        cx.shared.fs.write(snip_dst(&mydst, &invocation), serde_json::to_string(&impls).unwrap())?;
+        let all_impls = merge_snips::<TypeAliasSnip>(&mydst)?;
+        cx.shared.fs.write(mydst, all_impls.render(&cx.shared))?;
     }
 
     // Update the list of all implementors for traits
@@ -959,25 +878,9 @@ else if (window.initSearch) window.initSearch(searchIndex);
         cx.shared.ensure_dir(&mydst)?;
         mydst.push(&format!("{remote_item_type}.{}.js", remote_path[remote_path.len() - 1]));
 
-        let (mut all_implementors, _) =
-            try_err!(collect(&mydst, krate.name(cx.tcx()).as_str()), &mydst);
-        all_implementors.push(implementors);
-        // Sort the implementors by crate so the file will be generated
-        // identically even with rustdoc running in parallel.
-        all_implementors.sort();
-
-        let mut v = String::from("(function() {var implementors = {\n");
-        v.push_str(&all_implementors.join(",\n"));
-        v.push_str("\n};");
-        v.push_str(
-            "if (window.register_implementors) {\
-                 window.register_implementors(implementors);\
-             } else {\
-                 window.pending_implementors = implementors;\
-             }",
-        );
-        v.push_str("})()");
-        cx.shared.fs.write(mydst, v)?;
+        cx.shared.fs.write(snip_dst(&mydst, &invocation), serde_json::to_string(&implementors).unwrap())?;
+        let all_implementors = merge_snips::<TraitAliasSnip>(&mydst)?;
+        cx.shared.fs.write(mydst, all_implementors.render(&cx.shared))?;
     }
     Ok(())
 }
