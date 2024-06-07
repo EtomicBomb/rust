@@ -102,7 +102,6 @@ impl Hierarchy {
     }
 }
 
-
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 struct SortedJson<T>(T);
 
@@ -141,10 +140,6 @@ impl SortedJson<String> {
 trait Snip: Serialize + Default + for <'a> Deserialize<'a> {
     const NAME: &'static str;
     fn merge(&mut self, other: Self);
-    /// It is very annoying that this takes the shared context. It is only used in the crate list,
-    /// because it renders an entire page based off of whatever the layout and style files are
-    /// present.
-    fn render(&self, shared: &SharedContext<'_>) -> String;
 }
 
 struct InvocationIdentifier(String);
@@ -188,9 +183,11 @@ impl Snip for SourcesSnip {
     fn merge(&mut self, mut other: Self) {
         self.sources.append(&mut other.sources);
     }
+}
 
+impl SourcesSnip {
     /// Render search-index.js
-    fn render(&self, _shared: &SharedContext<'_>) -> String {
+    fn render(&self) -> String {
         let sources = SortedJson::array(self.sources.iter().map(|e| e.as_deref()));
         // This needs to be `var`, not `const`.
         // This variable needs declared in the current global scope so that if
@@ -215,9 +212,11 @@ impl Snip for SearchIndexSnip {
     fn merge(&mut self, mut other: Self) {
         self.all_indexes.append(&mut other.all_indexes);
     }
+}
 
+impl SearchIndexSnip {
     /// Render search-index.js
-    fn render(&self, _shared: &SharedContext<'_>) -> String {
+    fn render(&self) -> String {
         let all_indexes = SortedJson::array(self.all_indexes.iter().map(|e| e.as_deref()));
         format!(r"#\
 var searchIndex = new Map(JSON.parse('{all_indexes}'));
@@ -225,28 +224,6 @@ if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);
 #")
     }
-}
-
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct SearchDescriptionSnip {
-    descs: Vec<SortedJson<String>>,
-}
-
-impl Snip for SearchDescriptionSnip {
-    const NAME: &'static str = "search-index";
-    fn merge(&mut self, mut other: Self) {
-        self.descs.append(&mut other.descs);
-    }
-
-    /// render a search description shard
-    fn render(&self, _shared: &SharedContext<'_>) -> String {
-        todo!() 
-    }
-}
-
-fn render(snip: &SearchDescriptionSnip, shard: usize, crate_name: SortedJson<&str>) -> String {
-    let data = SortedJson::array(snip.descs.iter().map(|e| e.as_deref()));
-    format!("searchState.loadedDescShard({crate_name}, {shard}, {data})")
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -258,6 +235,11 @@ impl AllCratesSnip {
     fn new(crate_name: String) -> AllCratesSnip {
         AllCratesSnip { crates: Vec::from([crate_name]) }
     }
+
+    fn render(&self) -> String {
+        let crates = SortedJson::array(self.crates.iter().map(|krate| SortedJson::serialize(krate)).collect::<Vec<_>>());
+        format!("window.ALL_CRATES = {crates};")
+    }
 }
 
 impl Snip for AllCratesSnip {
@@ -265,15 +247,10 @@ impl Snip for AllCratesSnip {
     fn merge(&mut self, mut other: Self) {
         self.crates.append(&mut other.crates);
     }
-
-    fn render(&self, _shared: &SharedContext<'_>) -> String {
-        let crates = SortedJson::array(self.crates.iter().map(|krate| SortedJson::serialize(krate)).collect::<Vec<_>>());
-        format!("window.ALL_CRATES = {crates};")
-    }
 }
 
 impl AllCratesSnip {
-    fn render_crates_index(&self, shared: &SharedContext<'_>) -> String {
+    fn render_index_html(&self, shared: &SharedContext<'_>) -> String {
         let page = layout::Page {
             title: "Index of crates",
             css_class: "mod sys",
@@ -321,8 +298,10 @@ impl Snip for TypeAliasSnip {
     fn merge(&mut self, mut other: Self) {
         self.aliases.append(&mut other.aliases);
     }
+}
 
-    fn render(&self, _shared: &SharedContext<'_>) -> String {
+impl TypeAliasSnip {
+    fn render(&self) -> String {
         let aliases = SortedJson::object(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref())
     }
@@ -333,15 +312,17 @@ struct TraitAliasSnip {
     implementors: Vec<(SortedJson<String>, SortedJson<String>)>,
 }
 
+impl TraitAliasSnip {
+    fn render(&self) -> String {
+        let implementors = SortedJson::object(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref())
+    }
+}
+
 impl Snip for TraitAliasSnip {
     const NAME: &'static str = "trait-alias";
     fn merge(&mut self, mut other: Self) {
         self.implementors.append(&mut other.implementors);
-    }
-
-    fn render(&self, _shared: &SharedContext<'_>) -> String {
-        let implementors = SortedJson::object(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
-        implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref())
     }
 }
 
@@ -444,13 +425,12 @@ pub(super) fn dump(
             hierarchy.add_path(source);
         }
 
-        
         let dst = cx.dst.join("src-files.js"); // TODO: invocation specific
         let sources = SourcesSnip::new(encoded_crate_name.as_deref(), &hierarchy);
         cx.shared.fs.write(snip_dst(&dst, &invocation), serde_json::to_string(&sources).unwrap())?;
         let sources = merge_snips::<SourcesSnip>(&dst)?; 
         write_invocation_specific("src-files.js", &|| {
-            Ok(sources.render(&cx.shared).into_bytes())
+            Ok(sources.render().into_bytes())
         })?;
     }
 
@@ -464,7 +444,7 @@ pub(super) fn dump(
     cx.shared.fs.write(snip_dst(&dst, &invocation), serde_json::to_string(&index).unwrap())?;
     let index = merge_snips::<SearchIndexSnip>(&dst)?; 
     write_invocation_specific("search-index.js", &|| {
-        Ok(index.render(&cx.shared).into_bytes())
+        Ok(index.render().into_bytes())
     })?;
 
     // NOTE: this is fine because it odesn't write to a shared directory
@@ -509,13 +489,13 @@ pub(super) fn dump(
             crate::markdown::render(&index_page, md_opts, cx.shared.edition())
                 .map_err(|e| Error::new(e, &index_page))?;
         } else {
-            let crates_index = all_crates.render_crates_index(&cx.shared);
+            let crates_index = all_crates.render_index_html(&cx.shared);
             cx.shared.fs.write(dst_index, crates_index)?;
         }
     }
 
     write_invocation_specific("crates.js", &|| {
-        Ok(all_crates.render(&cx.shared).into())
+        Ok(all_crates.render().into())
     })?;
 
     let cloned_shared = Rc::clone(&cx.shared);
@@ -767,7 +747,7 @@ pub(super) fn dump(
 
         cx.shared.fs.write(snip_dst(&mydst, &invocation), serde_json::to_string(&impls).unwrap())?;
         let all_impls = merge_snips::<TypeAliasSnip>(&mydst)?;
-        cx.shared.fs.write(mydst, all_impls.render(&cx.shared))?;
+        cx.shared.fs.write(mydst, all_impls.render())?;
     }
 
     // Update the list of all implementors for traits
@@ -857,7 +837,7 @@ pub(super) fn dump(
 
         cx.shared.fs.write(snip_dst(&mydst, &invocation), serde_json::to_string(&implementors).unwrap())?;
         let all_implementors = merge_snips::<TraitAliasSnip>(&mydst)?;
-        cx.shared.fs.write(mydst, all_implementors.render(&cx.shared))?;
+        cx.shared.fs.write(mydst, all_implementors.render())?;
     }
     Ok(())
 }
