@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::marker::PhantomData;
 use std::cell::RefCell;
 use std::fs::{self, read_dir};
 use std::path::{Component, Path, PathBuf};
@@ -135,60 +136,67 @@ impl SortedJson<String> {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Snip<T, U> {
+    #[serde(skip)]
+    _marker: PhantomData<T>,
+    items: Vec<U>, 
+}
 
-#[allow(dead_code)]
-trait Snip: Serialize + Default + for <'a> Deserialize<'a> {
-    const NAME: &'static str;
-    fn merge(&mut self, other: Self);
+impl<T, U> Default for Snip<T, U> {
+     fn default() -> Self {
+        Self { _marker: PhantomData, items: Vec::default() }
+     }
+}
+
+impl<T, U> Snip<T, U> {
+    fn one(item: U) -> Self {
+        Snip { items: Vec::from([item]), _marker: PhantomData }
+    }
+
+    fn merge(&mut self, mut other: Self) {
+        self.items.append(&mut other.items);
+    }
+
+    fn merge_snips(doc_root: &Path) -> Result<Self, Error> 
+        where U: for <'a> Deserialize<'a> 
+    {
+        let dst = doc_root.join("snips");
+        let snips = try_err!(read_dir(&dst), &dst)
+            .map(|snip_path| {
+                let snip_path = try_err!(snip_path, &dst); // TODO: better error
+                let snip_path = snip_path.path();
+                let snip = try_err!(fs::read(&snip_path), &snip_path);
+                let snip = try_err!(serde_json::from_slice(&snip), &snip_path);
+                Ok::<Self, Error>(snip)
+            })
+            .try_fold(Self::default(), |mut snips, snip| {
+                snips.merge(snip?);
+                Ok(snips)
+            })?;
+        Ok(snips)
+    }
 }
 
 struct InvocationIdentifier(String);
 
-fn snip_dst(dst: &Path, invocation: &InvocationIdentifier) -> PathBuf {
-    [dst, Path::new("snips"), Path::new(&invocation.0)].into_iter().collect()
+fn snip_dst(doc_root: &Path, invocation: &InvocationIdentifier) -> PathBuf {
+    [doc_root, Path::new("snips"), Path::new(&invocation.0)].into_iter().collect()
 }
 
-fn merge_snips<S: Snip>(dst: &Path) -> Result<S, Error> {
-    let dst = dst.join("snips");
-    let snips = try_err!(read_dir(&dst), &dst)
-        .map(|snip_path| {
-            let snip_path = try_err!(snip_path, &dst); // TODO: better error
-            let snip_path = snip_path.path();
-            let snip = try_err!(fs::read(&snip_path), &snip_path);
-            let snip = try_err!(serde_json::from_slice(&snip), &snip_path);
-            Ok::<S, Error>(snip)
-        })
-        .try_fold(S::default(), |mut snips, snip| {
-            snips.merge(snip?);
-            Ok(snips)
-        })?;
-    Ok(snips)
-}
+struct Sources;
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct SourcesSnip {
-    sources: Vec<SortedJson<String>>,
-}
+type SourcesSnip = Snip<Sources, SortedJson<String>>;
 
 impl SourcesSnip {
-    fn new(crate_name: SortedJson<&str>, hierarchy: &Hierarchy) -> SourcesSnip {
+    fn new(crate_name: SortedJson<&str>, hierarchy: &Hierarchy) -> Self {
         let hierarchy = hierarchy.to_json_string();
-        let sources = Vec::from([SortedJson::array([crate_name, hierarchy.as_deref()])]);
-        SourcesSnip { sources }
+        Snip::one(SortedJson::array([crate_name, hierarchy.as_deref()]))
     }
-}
 
-impl Snip for SourcesSnip {
-    const NAME: &'static str = "sources";
-    fn merge(&mut self, mut other: Self) {
-        self.sources.append(&mut other.sources);
-    }
-}
-
-impl SourcesSnip {
     /// Render search-index.js
     fn render(&self) -> String {
-        let sources = SortedJson::array(self.sources.iter().map(|e| e.as_deref()));
+        let sources = SortedJson::array(self.items.iter().map(|e| e.as_deref()));
         // This needs to be `var`, not `const`.
         // This variable needs declared in the current global scope so that if
         // src-script.js loads first, it can pick it up.
@@ -196,28 +204,16 @@ impl SourcesSnip {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct SearchIndexSnip {
-    all_indexes: Vec<SortedJson<String>>,
-}
+struct SearchIndex;
+type SearchIndexSnip = Snip<SearchIndex, SortedJson<String>>;
 
 impl SearchIndexSnip {
     fn new(index: &str) -> Self {
-        Self { all_indexes: Vec::from([SortedJson::serialize(index)]) }
+        Self::one(SortedJson::serialize(index))
     }
-}
 
-impl Snip for SearchIndexSnip {
-    const NAME: &'static str = "search-index";
-    fn merge(&mut self, mut other: Self) {
-        self.all_indexes.append(&mut other.all_indexes);
-    }
-}
-
-impl SearchIndexSnip {
-    /// Render search-index.js
     fn render(&self) -> String {
-        let all_indexes = SortedJson::array(self.all_indexes.iter().map(|e| e.as_deref()));
+        let all_indexes = SortedJson::array(self.items.iter().map(|e| e.as_deref()));
         format!(r"#\
 var searchIndex = new Map(JSON.parse('{all_indexes}'));
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
@@ -226,30 +222,19 @@ else if (window.initSearch) window.initSearch(searchIndex);
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct AllCratesSnip {
-    crates: Vec<String>,
-}
+struct AllCrates;
+type AllCratesSnip = Snip<AllCrates, String>;
 
 impl AllCratesSnip {
-    fn new(crate_name: String) -> AllCratesSnip {
-        AllCratesSnip { crates: Vec::from([crate_name]) }
+    fn new(crate_name: String) -> Self {
+        Self::one(crate_name)
     }
 
     fn render(&self) -> String {
-        let crates = SortedJson::array(self.crates.iter().map(|krate| SortedJson::serialize(krate)).collect::<Vec<_>>());
+        let crates = SortedJson::array(self.items.iter().map(|krate| SortedJson::serialize(krate)).collect::<Vec<_>>());
         format!("window.ALL_CRATES = {crates};")
     }
-}
 
-impl Snip for AllCratesSnip {
-    const NAME: &'static str = "all-crates";
-    fn merge(&mut self, mut other: Self) {
-        self.crates.append(&mut other.crates);
-    }
-}
-
-impl AllCratesSnip {
     fn render_index_html(&self, shared: &SharedContext<'_>) -> String {
         let page = layout::Page {
             title: "Index of crates",
@@ -264,7 +249,7 @@ impl AllCratesSnip {
         let style_files = &shared.style_files;
         let content = format!(
             "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
-            self.crates.iter().format_with("", |k, f| {
+            self.items.iter().format_with("", |k, f| {
                 f(&format_args!(
                     "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
                     trailing_slash = ensure_trailing_slash(k),
@@ -288,41 +273,23 @@ fn implementors_iife(impls: &str, register: &str, pending: &str, json: SortedJso
 #")
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct TypeAliasSnip {
-    aliases: Vec<(SortedJson<String>, SortedJson<String>)>,
-}
-
-impl Snip for TypeAliasSnip {
-    const NAME: &'static str = "type-alias";
-    fn merge(&mut self, mut other: Self) {
-        self.aliases.append(&mut other.aliases);
-    }
-}
+struct TypeAlias;
+type TypeAliasSnip = Snip<TypeAlias, (SortedJson<String>, SortedJson<String>)>;
 
 impl TypeAliasSnip {
     fn render(&self) -> String {
-        let aliases = SortedJson::object(self.aliases.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let aliases = SortedJson::object(self.items.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("type_impls", "register_type_impls", "pending_type_impls", aliases.as_deref())
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-struct TraitAliasSnip {
-    implementors: Vec<(SortedJson<String>, SortedJson<String>)>,
-}
+struct TraitAlias;
+type TraitAliasSnip = Snip<TraitAlias, (SortedJson<String>, SortedJson<String>)>;
 
 impl TraitAliasSnip {
     fn render(&self) -> String {
-        let implementors = SortedJson::object(self.implementors.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let implementors = SortedJson::object(self.items.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
         implementors_iife("implementors", "register_implementors", "pending_type_impls", implementors.as_deref())
-    }
-}
-
-impl Snip for TraitAliasSnip {
-    const NAME: &'static str = "trait-alias";
-    fn merge(&mut self, mut other: Self) {
-        self.implementors.append(&mut other.implementors);
     }
 }
 
@@ -428,7 +395,7 @@ pub(super) fn dump(
         let dst = cx.dst.join("src-files.js"); // TODO: invocation specific
         let sources = SourcesSnip::new(encoded_crate_name.as_deref(), &hierarchy);
         cx.shared.fs.write(snip_dst(&dst, &invocation), serde_json::to_string(&sources).unwrap())?;
-        let sources = merge_snips::<SourcesSnip>(&dst)?; 
+        let sources = SourcesSnip::merge_snips(&dst)?; 
         write_invocation_specific("src-files.js", &|| {
             Ok(sources.render().into_bytes())
         })?;
@@ -442,7 +409,7 @@ pub(super) fn dump(
     let dst = cx.dst.join("search-index.js");
     let index = SearchIndexSnip::new(&index);
     cx.shared.fs.write(snip_dst(&dst, &invocation), serde_json::to_string(&index).unwrap())?;
-    let index = merge_snips::<SearchIndexSnip>(&dst)?; 
+    let index = SearchIndexSnip::merge_snips(&dst)?; 
     write_invocation_specific("search-index.js", &|| {
         Ok(index.render().into_bytes())
     })?;
@@ -476,7 +443,7 @@ pub(super) fn dump(
     let dst_index = cx.dst.join("index.html");
     let all_crates = AllCratesSnip::new(crate_name.clone());
     cx.shared.fs.write(snip_dst(&dst_index, &invocation), serde_json::to_string(&all_crates).unwrap())?;
-    let all_crates = merge_snips::<AllCratesSnip>(&dst_index)?; // TODO: snip_dst needs to append a file
+    let all_crates = AllCratesSnip::merge_snips(&dst_index)?; // TODO: snip_dst needs to append a file
     // TODO: need write and merge to avoid reading our own writess
     // TODO: consider how to clean up these files
 
@@ -746,7 +713,7 @@ pub(super) fn dump(
         ));
 
         cx.shared.fs.write(snip_dst(&mydst, &invocation), serde_json::to_string(&impls).unwrap())?;
-        let all_impls = merge_snips::<TypeAliasSnip>(&mydst)?;
+        let all_impls = TypeAliasSnip::merge_snips(&mydst)?;
         cx.shared.fs.write(mydst, all_impls.render())?;
     }
 
@@ -836,7 +803,7 @@ pub(super) fn dump(
         mydst.push(&format!("{remote_item_type}.{}.js", remote_path[remote_path.len() - 1]));
 
         cx.shared.fs.write(snip_dst(&mydst, &invocation), serde_json::to_string(&implementors).unwrap())?;
-        let all_implementors = merge_snips::<TraitAliasSnip>(&mydst)?;
+        let all_implementors = TraitAliasSnip::merge_snips(&mydst)?;
         cx.shared.fs.write(mydst, all_implementors.render())?;
     }
     Ok(())
