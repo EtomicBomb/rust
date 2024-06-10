@@ -690,9 +690,9 @@ fn write_parts(
         cx,
     };
 
-    DocVisitor::visit_crate(&mut type_impl_collector, &krate);
 
     let mut path_parts = PathParts::<TypeAliasPart>::default();
+    DocVisitor::visit_crate(&mut type_impl_collector, &krate);
     let cx = type_impl_collector.cx;
     let aliased_types = type_impl_collector.aliased_types;
     for aliased_type in aliased_types.values() {
