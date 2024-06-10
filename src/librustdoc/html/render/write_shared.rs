@@ -216,9 +216,9 @@ impl<T, U> PathParts<Part<T, U>> {
 }
 
 impl<T: NamedArtifact, U: Serialize> PathParts<Part<T, U>> {
-    fn write(self, doc_root: &Path, invocation: &InvocationIdentifier) -> Result<(), Error> {
-        let path = PathBuf::from_iter([doc_root, Path::new(".parts"), Path::new(&invocation.0), Path::new(T::NAME)]);
-        try_err!(fs::write(&path, serde_json::to_string(&self).unwrap()), &path);
+    fn write(self, cx: &mut Context<'_>, invocation: &InvocationIdentifier) -> Result<(), Error> {
+        let path = PathBuf::from_iter([&cx.dst, Path::new(".parts"), Path::new(&invocation.0), Path::new(T::NAME)]);
+        write_create_parents(cx, path, serde_json::to_string(&self).unwrap())?;
         Ok(())
     }
 }
@@ -270,9 +270,16 @@ impl NamedArtifact for SearchIndex {
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct AllCrates;
-type AllCratesPart = Part<AllCrates, String>;
+type AllCratesPart = Part<AllCrates, SortedJson<String>>;
 impl NamedArtifact for AllCrates {
     const NAME: &'static str = "all-crates";
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+struct CratesIndex;
+type CratesIndexPart = Part<CratesIndex, String>;
+impl NamedArtifact for CratesIndex {
+    const NAME: &'static str = "crates-index";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -289,7 +296,7 @@ impl NamedArtifact for TraitAlias {
     const NAME: &'static str = "trait-alias";
 }
 
-fn render_index_html(part: &AllCratesPart, shared: &SharedContext<'_>) -> String {
+fn render_index_html(part: &CratesIndexPart, shared: &SharedContext<'_>) -> String {
     let page = layout::Page {
         title: "Index of crates",
         css_class: "mod sys",
@@ -313,6 +320,13 @@ fn render_index_html(part: &AllCratesPart, shared: &SharedContext<'_>) -> String
     layout::render(layout, &page, "", content, &style_files)
 }
 
+fn write_create_parents(cx: &mut Context<'_>, path: PathBuf, content: String) -> Result<(), Error> {
+    let parent = path.parent().expect("trying to write to an empty path");
+    try_err!(cx.shared.fs.create_dir_all(parent), parent);
+    cx.shared.fs.write(path, content)?;
+    Ok(())
+}
+
 fn write_merged(
     cx: &mut Context<'_>,
     options: &RenderOptions,
@@ -329,14 +343,14 @@ fn write_merged(
             // This variable needs declared in the current global scope so that if
             // src-script.js loads first, it can pick it up.
             let content = format!("var srcIndex = new Map({sources}); createSrcSidebar();");
-            cx.shared.fs.write(path, content)?;
+            write_create_parents(cx, path, content)?;
         }
     }
 
     if emit_invocation_specific {
         for (path, part) in SearchIndexPart::read_merged_parts(&cx.dst, invocations)? {
             let all_indexes = SortedJson::array(part.items.iter().map(|e| e.as_deref()));
-            cx.shared.fs.write(path, format!(r"#
+            write_create_parents(cx, path, format!(r"#
 var searchIndex = new Map({all_indexes});
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);
@@ -344,13 +358,15 @@ else if (window.initSearch) window.initSearch(searchIndex);
         }
     }
 
-    for (path, part) in AllCratesPart::read_merged_parts(&cx.dst, invocations)? {
-        if emit_invocation_specific {
-            let crates = SortedJson::array(part.items.iter().map(|krate| SortedJson::serialize(krate)).collect::<Vec<_>>());
-            cx.shared.fs.write(path.clone(), format!("window.ALL_CRATES = {crates};"))?;
+    if emit_invocation_specific {
+        for (path, part) in AllCratesPart::read_merged_parts(&cx.dst, invocations)? {
+            let crates = SortedJson::array(part.items.iter().map(|krate| krate.as_deref()).collect::<Vec<_>>());
+            write_create_parents(cx, path, format!("window.ALL_CRATES = {crates};"))?;
         }
+    }
 
-        if options.enable_index_page {
+    if options.enable_index_page {
+        for (path, part) in CratesIndexPart::read_merged_parts(&cx.dst, invocations)? {
             if let Some(index_page) = options.index_page.clone() {
                 let mut md_opts = options.clone();
                 md_opts.output = cx.dst.clone();
@@ -359,7 +375,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
                     .map_err(|e| Error::new(e, &index_page))?;
             } else {
                 let part = render_index_html(&part, &cx.shared);
-                cx.shared.fs.write(path, part)?;
+                write_create_parents(cx, path, part)?;
             }
         }
     }
@@ -378,13 +394,13 @@ if (window.{register}) {{
 
     for (path, part) in TypeAliasPart::read_merged_parts(&cx.dst, invocations)? {
         let part = SortedJson::object(part.items.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
-        cx.shared.fs.write(path, implementors_iife("type_impls", "register_type_impls", "pending_type_impls", part))?;
+        write_create_parents(cx, path, implementors_iife("type_impls", "register_type_impls", "pending_type_impls", part))?;
         
     }
 
     for (path, part) in TraitAliasPart::read_merged_parts(&cx.dst, invocations)? {
         let part = SortedJson::object(part.items.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
-        cx.shared.fs.write(path, implementors_iife("implementors", "register_implementors", "pending_implementors", part))?;
+        write_create_parents(cx, path, implementors_iife("implementors", "register_implementors", "pending_implementors", part))?;
     }
 
     Ok(())
@@ -632,9 +648,14 @@ fn write_parts(
 
     let crate_name = krate.name(cx.tcx()).to_string();
     let encoded_crate_name = SortedJson::serialize(crate_name.clone());
+
     let path = PathBuf::from("index.html");
-    let part = AllCratesPart::one(crate_name.clone());
-    PathParts::<AllCratesPart>::with(path, part).write(&cx.dst, invocation)?;
+    let part = CratesIndexPart::one(crate_name.clone());
+    PathParts::<CratesIndexPart>::with(path, part).write(cx, invocation)?;
+
+    let path = PathBuf::from("crates.js");
+    let part = AllCratesPart::one(encoded_crate_name.clone());
+    PathParts::<AllCratesPart>::with(path, part).write(cx, invocation)?;
 
     let hierarchy = Rc::new(Hierarchy::default());
     for source in cx
@@ -647,14 +668,14 @@ fn write_parts(
     }
     let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
     let part = SourcesPart::one(SortedJson::serialize(&crate_name));
-    PathParts::<SourcesPart>::with(path, part).write(&cx.dst, invocation)?;
+    PathParts::<SourcesPart>::with(path, part).write(cx, invocation)?;
 
     // Update the search index and crate list.
     let SerializedSearchIndex { index, desc } = search_index;
 
     let path = suffix_path("search-index.js", &cx.shared.resource_suffix);
     let part = SearchIndexPart::one(SortedJson::serialize(&index));
-    PathParts::<SearchIndexPart>::with(path, part).write(&cx.dst, invocation)?;
+    PathParts::<SearchIndexPart>::with(path, part).write(cx, invocation)?;
 
     let search_desc_dir = cx.dst.join(format!("search.desc/{crate_name}"));
     if Path::new(&search_desc_dir).exists() {
@@ -689,8 +710,6 @@ fn write_parts(
         cache,
         cx,
     };
-
-
     let mut path_parts = PathParts::<TypeAliasPart>::default();
     DocVisitor::visit_crate(&mut type_impl_collector, &krate);
     let cx = type_impl_collector.cx;
@@ -775,7 +794,7 @@ fn write_parts(
         let part = TypeAliasPart::one((encoded_crate_name.clone(), part));
         path_parts.push(path, part);
     }
-    path_parts.write(&cx.dst, invocation)?;
+    path_parts.write(cx, invocation)?;
 
     let mut path_parts = PathParts::<TraitAliasPart>::default();
     // Update the list of all implementors for traits
@@ -838,7 +857,8 @@ fn write_parts(
         let part = TraitAliasPart::one((encoded_crate_name.clone(), part));
         path_parts.push(path, part);
     }
-    path_parts.write(&cx.dst, invocation)?;
+    path_parts.write(cx, invocation)?;
+    // TODO: remove this directory before writing?
 
     Ok(())
 }
