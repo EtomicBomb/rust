@@ -652,6 +652,14 @@ fn opts() -> Vec<RustcOptGroup> {
         unstable("html-no-source", |o| {
             o.optflag("", "html-no-source", "Disable HTML source code pages generation")
         }),
+        unstable("no-merge-parts", |o| {
+            o.optflag(
+                "",
+                "no-merge-parts",
+                "Generates the `doc/.parts` directory, but not the shared artifacts. \
+                This delays the generation of much of the documentation until  \
+                `rustdoc link` is run.")
+        })
     ]
 }
 

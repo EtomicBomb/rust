@@ -1,4 +1,18 @@
 #![allow(dead_code)]
+//! Rustdoc writes out two kinds of shared files:
+//!  - Static files, which are embedded in the rustdoc binary and are written with a
+//!    filename that includes a hash of their contents. These will always have a new
+//!    URL if the contents change, so they are safe to cache with the
+//!    `Cache-Control: immutable` directive. They are written under the static.files/
+//!    directory and are written when --emit-type is empty (default) or contains
+//!    "toolchain-specific". If using the --static-root-path flag, it should point
+//!    to a URL path prefix where each of these filenames can be fetched.
+//!  - Invocation specific files. These are generated based on the crate(s) being
+//!    documented. Their filenames need to be predictable without knowing their
+//!    contents, so they do not include a hash in their filename and are not safe to
+//!    cache with `Cache-Control: immutable`. They include the contents of the
+//!    --resource-suffix flag and are emitted when --emit-type is empty (default)
+//!    or contains "invocation-specific".
 
 use std:: marker::PhantomData;
 use std::cell::RefCell;
@@ -10,7 +24,6 @@ use std::ffi::OsString;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
-use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_span::def_id::DefId;
@@ -34,64 +47,8 @@ use crate::html::static_files::{self, suffix_path};
 use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
 
-/// Rustdoc writes out two kinds of shared files:
-///  - Static files, which are embedded in the rustdoc binary and are written with a
-///    filename that includes a hash of their contents. These will always have a new
-///    URL if the contents change, so they are safe to cache with the
-///    `Cache-Control: immutable` directive. They are written under the static.files/
-///    directory and are written when --emit-type is empty (default) or contains
-///    "toolchain-specific". If using the --static-root-path flag, it should point
-///    to a URL path prefix where each of these filenames can be fetched.
-///  - Invocation specific files. These are generated based on the crate(s) being
-///    documented. Their filenames need to be predictable without knowing their
-///    contents, so they do not include a hash in their filename and are not safe to
-///    cache with `Cache-Control: immutable`. They include the contents of the
-///    --resource-suffix flag and are emitted when --emit-type is empty (default)
-///    or contains "invocation-specific".
-pub(super) fn write_shared(
-    cx: &mut Context<'_>,
-    krate: &Crate,
-    search_index: SerializedSearchIndex,
-    options: &RenderOptions,
-) -> Result<(), Error> {
-    let lock_file = cx.dst.join(".lock");
-    let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
-    let invocation = InvocationIdentifier(krate.name(cx.tcx()).to_string());
-    write_parts(cx, krate, &invocation, search_index)?;
-    let invocations = get_all_invocations(&cx.dst)?;
-    write_static_files(cx, options)?;
-    write_merged(cx, options, &invocations)?;
-    Ok(())
-}
-
-/// Creates the parts files, does not generate any of the shared artifacts
-pub(super) fn write_no_merge_parts(
-    cx: &mut Context<'_>,
-    krate: &Crate,
-    invocation: &InvocationIdentifier,
-    search_index: SerializedSearchIndex,
-) -> Result<(), Error> {
-    let lock_file = cx.dst.join(".lock");
-    let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
-    write_parts(cx, krate, invocation, search_index)?;
-    Ok(())
-}
-
-/// Generates the shared artifacts from the parts files
-pub(super) fn link(
-    cx: &mut Context<'_>,
-    invocations: &[InvocationIdentifier],
-    options: &RenderOptions,
-) -> Result<(), Error> {
-    let lock_file = cx.dst.join(".lock");
-    let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
-    write_static_files(cx, options)?;
-    write_merged(cx, options, invocations)?;
-    Ok(())
-}
-
 /// Writes the static files, the style files, and the css extensions
-fn write_static_files(
+pub(crate) fn write_static_files(
     cx: &mut Context<'_>,
     options: &RenderOptions,
 ) -> Result<(), Error> {
@@ -176,11 +133,13 @@ impl SortedJson {
     }
 }
 
-// TODO: is this just the crate name
 /// Identifies a particular run of rustdoc. The crate name.
-pub struct InvocationIdentifier(String);
+pub(crate) struct InvocationIdentifier(String);
 
-fn get_all_invocations(doc_root: &Path) -> Result<Vec<InvocationIdentifier>, Error> {
+/// Gets the complete list that have been documented by inspecting `doc/.parts`.
+/// Users may prefer to provide their own list by documenting the crates separately, and linking
+/// them with `rustdoc link`.
+pub(crate) fn all_documented_crates(doc_root: &Path) -> Result<Vec<InvocationIdentifier>, Error> {
     let parts_path = PathBuf::from_iter([doc_root, Path::new(".parts")]);
     try_err!(read_dir(&parts_path), &parts_path)
         .map(|invocation| {
@@ -229,6 +188,9 @@ impl<T: NamedArtifact, U: Serialize> PathParts<Part<T, U>> {
     }
 }
 
+/// A piece of one of the shared artifacts for documentation (search index, sources, alias list, etc.)
+///
+/// Merged at a user specified time and written to the `doc/` directory
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(transparent)]
 struct Part<T, U> {
@@ -343,7 +305,7 @@ fn write_create_parents(cx: &mut Context<'_>, path: PathBuf, content: String) ->
     Ok(())
 }
 
-fn write_merged(
+pub(crate) fn write_merged(
     cx: &mut Context<'_>,
     options: &RenderOptions,
     invocations: &[InvocationIdentifier],
@@ -381,8 +343,6 @@ else if (window.initSearch) window.initSearch(searchIndex);
         let part = try_err!(only_element(part.items).ok_or("not one shard in part"), &path);
         write_create_parents(cx, path, part)?;
     }
-
-    // TODO remove the directory
 
     if emit_invocation_specific {
         for (path, part) in AllCratesPart::read_merged_parts(&cx.dst, invocations)? {
@@ -599,6 +559,7 @@ impl Serialize for AliasSerializableImpl {
     }
 }
 
+/// Source directory tree
 #[derive(Debug, Default)]
 struct Hierarchy {
     parent: Weak<Self>,
@@ -662,10 +623,10 @@ impl Hierarchy {
     }
 }
 
-fn write_parts(
+/// Documents the shared artifacts from `krate` to the `doc/.parts` directory
+pub(crate) fn write_parts(
     cx: &mut Context<'_>,
     krate: &Crate,
-    invocation: &InvocationIdentifier,
     search_index: SerializedSearchIndex,
 ) -> Result<(), Error> {
     // Write out the shared files. Note that these are shared among all rustdoc
@@ -673,15 +634,16 @@ fn write_parts(
     // operation with respect to all other rustdocs running around.
 
     let crate_name = krate.name(cx.tcx()).to_string();
-    let encoded_crate_name = SortedJson::serialize(crate_name.clone());
+    let encoded_crate_name = SortedJson::serialize(&crate_name);
+    let invocation = InvocationIdentifier(crate_name.clone());
 
     let path = PathBuf::from("index.html");
     let part = CratesIndexPart::one(crate_name.clone());
-    PathParts::<CratesIndexPart>::with(path, part).write(cx, invocation)?;
+    PathParts::<CratesIndexPart>::with(path, part).write(cx, &invocation)?;
 
     let path = PathBuf::from("crates.js");
     let part = AllCratesPart::one(encoded_crate_name.clone());
-    PathParts::<AllCratesPart>::with(path, part).write(cx, invocation)?;
+    PathParts::<AllCratesPart>::with(path, part).write(cx, &invocation)?;
 
     let hierarchy = Rc::new(Hierarchy::default());
     for source in cx
@@ -694,14 +656,14 @@ fn write_parts(
     }
     let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
     let part = SourcesPart::one(SortedJson::serialize(&crate_name));
-    PathParts::<SourcesPart>::with(path, part).write(cx, invocation)?;
+    PathParts::<SourcesPart>::with(path, part).write(cx, &invocation)?;
 
     // Update the search index and crate list.
     let SerializedSearchIndex { index, desc } = search_index;
 
     let path = suffix_path("search-index.js", &cx.shared.resource_suffix);
     let part = SearchIndexPart::one(SortedJson::serialize(&index));
-    PathParts::<SearchIndexPart>::with(path, part).write(cx, invocation)?;
+    PathParts::<SearchIndexPart>::with(path, part).write(cx, &invocation)?;
 
     let mut parts = PathParts::<SearchDescPart>::default();
     for (i, (_, part)) in desc.into_iter().enumerate() {
@@ -714,7 +676,7 @@ fn write_parts(
         let part = SearchDescPart::one(part);
         parts.push(path, part);
     }
-    parts.write(cx, invocation)?;
+    parts.write(cx, &invocation)?;
 
     let cloned_shared = Rc::clone(&cx.shared);
     let cache = &cloned_shared.cache;
@@ -809,7 +771,7 @@ fn write_parts(
         let part = TypeAliasPart::one((encoded_crate_name.clone(), part));
         path_parts.push(path, part);
     }
-    path_parts.write(cx, invocation)?;
+    path_parts.write(cx, &invocation)?;
 
     let mut path_parts = PathParts::<TraitAliasPart>::default();
     // Update the list of all implementors for traits
@@ -872,8 +834,7 @@ fn write_parts(
         let part = TraitAliasPart::one((encoded_crate_name.clone(), part));
         path_parts.push(path, part);
     }
-    path_parts.write(cx, invocation)?;
-    // TODO: remove this directory before writing?
+    path_parts.write(cx, &invocation)?;
 
     Ok(())
 }

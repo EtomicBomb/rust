@@ -291,6 +291,10 @@ pub(crate) struct RenderOptions {
     pub(crate) no_emit_shared: bool,
     /// If `true`, HTML source code pages won't be generated.
     pub(crate) html_no_source: bool,
+    /// Generates the `doc/.parts` directory, but not the shared artifacts.
+    /// This delays the generation of much of the documentation until
+    /// `rustdoc link` is run.
+    pub(crate) no_merge_parts: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -734,6 +738,7 @@ impl Options {
         let extern_html_root_takes_precedence =
             matches.opt_present("extern-html-root-takes-precedence");
         let html_no_source = matches.opt_present("html-no-source");
+        let no_merge_parts = matches.opt_present("no-merge-parts");
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -819,6 +824,7 @@ impl Options {
             call_locations,
             no_emit_shared: false,
             html_no_source,
+            no_merge_parts,
         };
         Some((options, render_options))
     }
