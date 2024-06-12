@@ -281,7 +281,7 @@ impl IndexItemFunctionType {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct StylePath {
     /// The path to the theme
     pub(crate) path: PathBuf,
