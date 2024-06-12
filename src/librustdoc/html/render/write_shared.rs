@@ -143,7 +143,7 @@ fn only_element<T>(mut items: Vec<T>) -> Option<T> {
 }
 
 // FIXME: this fixes only rustdoc part of instability of trait impls for js files, see #120371
-/// Prerenedered json. Arrays and objects are sorted by their string representation of each
+/// Prerenedered json. Arrays and objects are sorted by the string representation of each
 /// entry.
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct SortedJson(String);
