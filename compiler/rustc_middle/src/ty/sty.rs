@@ -21,6 +21,7 @@ use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
 use rustc_target::spec::abi;
+use rustc_type_ir::visit::TypeVisitableExt;
 use std::assert_matches::debug_assert_matches;
 use std::borrow::Cow;
 use std::iter;
@@ -338,6 +339,27 @@ impl ParamConst {
 
     pub fn for_def(def: &ty::GenericParamDef) -> ParamConst {
         ParamConst::new(def.index, def.name)
+    }
+
+    pub fn find_ty_from_env<'tcx>(self, env: ParamEnv<'tcx>) -> Ty<'tcx> {
+        let mut candidates = env.caller_bounds().iter().filter_map(|clause| {
+            // `ConstArgHasType` are never desugared to be higher ranked.
+            match clause.kind().skip_binder() {
+                ty::ClauseKind::ConstArgHasType(param_ct, ty) => {
+                    assert!(!(param_ct, ty).has_escaping_bound_vars());
+
+                    match param_ct.kind() {
+                        ty::ConstKind::Param(param_ct) if param_ct.index == self.index => Some(ty),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        });
+
+        let ty = candidates.next().unwrap();
+        assert!(candidates.next().is_none());
+        ty
     }
 }
 
@@ -788,12 +810,82 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         Ty::new_alias(interner, kind, alias_ty)
     }
 
+    fn new_error(interner: TyCtxt<'tcx>, guar: ErrorGuaranteed) -> Self {
+        Ty::new_error(interner, guar)
+    }
+
+    fn new_adt(
+        interner: TyCtxt<'tcx>,
+        adt_def: ty::AdtDef<'tcx>,
+        args: ty::GenericArgsRef<'tcx>,
+    ) -> Self {
+        Ty::new_adt(interner, adt_def, args)
+    }
+
+    fn new_foreign(interner: TyCtxt<'tcx>, def_id: DefId) -> Self {
+        Ty::new_foreign(interner, def_id)
+    }
+
+    fn new_dynamic(
+        interner: TyCtxt<'tcx>,
+        preds: &'tcx List<ty::PolyExistentialPredicate<'tcx>>,
+        region: ty::Region<'tcx>,
+        kind: ty::DynKind,
+    ) -> Self {
+        Ty::new_dynamic(interner, preds, region, kind)
+    }
+
     fn new_coroutine(
         interner: TyCtxt<'tcx>,
         def_id: DefId,
         args: ty::GenericArgsRef<'tcx>,
     ) -> Self {
         Ty::new_coroutine(interner, def_id, args)
+    }
+
+    fn new_coroutine_closure(
+        interner: TyCtxt<'tcx>,
+        def_id: DefId,
+        args: ty::GenericArgsRef<'tcx>,
+    ) -> Self {
+        Ty::new_coroutine_closure(interner, def_id, args)
+    }
+
+    fn new_closure(interner: TyCtxt<'tcx>, def_id: DefId, args: ty::GenericArgsRef<'tcx>) -> Self {
+        Ty::new_closure(interner, def_id, args)
+    }
+
+    fn new_coroutine_witness(
+        interner: TyCtxt<'tcx>,
+        def_id: DefId,
+        args: ty::GenericArgsRef<'tcx>,
+    ) -> Self {
+        Ty::new_coroutine_witness(interner, def_id, args)
+    }
+
+    fn new_ptr(interner: TyCtxt<'tcx>, ty: Self, mutbl: hir::Mutability) -> Self {
+        Ty::new_ptr(interner, ty, mutbl)
+    }
+
+    fn new_ref(
+        interner: TyCtxt<'tcx>,
+        region: ty::Region<'tcx>,
+        ty: Self,
+        mutbl: hir::Mutability,
+    ) -> Self {
+        Ty::new_ref(interner, region, ty, mutbl)
+    }
+
+    fn new_array_with_const_len(interner: TyCtxt<'tcx>, ty: Self, len: ty::Const<'tcx>) -> Self {
+        Ty::new_array_with_const_len(interner, ty, len)
+    }
+
+    fn new_slice(interner: TyCtxt<'tcx>, ty: Self) -> Self {
+        Ty::new_slice(interner, ty)
+    }
+
+    fn new_tup(interner: TyCtxt<'tcx>, tys: &[Ty<'tcx>]) -> Self {
+        Ty::new_tup(interner, tys)
     }
 
     fn new_tup_from_iter<It, T>(interner: TyCtxt<'tcx>, iter: It) -> T::Output
@@ -821,6 +913,18 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         kind: rustc_type_ir::ClosureKind,
     ) -> Self {
         Ty::from_coroutine_closure_kind(interner, kind)
+    }
+
+    fn new_fn_def(interner: TyCtxt<'tcx>, def_id: DefId, args: ty::GenericArgsRef<'tcx>) -> Self {
+        Ty::new_fn_def(interner, def_id, args)
+    }
+
+    fn new_fn_ptr(interner: TyCtxt<'tcx>, sig: ty::Binder<'tcx, ty::FnSig<'tcx>>) -> Self {
+        Ty::new_fn_ptr(interner, sig)
+    }
+
+    fn new_pat(interner: TyCtxt<'tcx>, ty: Self, pat: ty::Pattern<'tcx>) -> Self {
+        Ty::new_pat(interner, ty, pat)
     }
 }
 
@@ -1787,43 +1891,6 @@ impl<'tcx> rustc_type_ir::inherent::Tys<TyCtxt<'tcx>> for &'tcx ty::List<Ty<'tcx
     fn split_inputs_and_output(self) -> (&'tcx [Ty<'tcx>], Ty<'tcx>) {
         let (output, inputs) = self.split_last().unwrap();
         (inputs, *output)
-    }
-}
-
-/// Extra information about why we ended up with a particular variance.
-/// This is only used to add more information to error messages, and
-/// has no effect on soundness. While choosing the 'wrong' `VarianceDiagInfo`
-/// may lead to confusing notes in error messages, it will never cause
-/// a miscompilation or unsoundness.
-///
-/// When in doubt, use `VarianceDiagInfo::default()`
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum VarianceDiagInfo<'tcx> {
-    /// No additional information - this is the default.
-    /// We will not add any additional information to error messages.
-    #[default]
-    None,
-    /// We switched our variance because a generic argument occurs inside
-    /// the invariant generic argument of another type.
-    Invariant {
-        /// The generic type containing the generic parameter
-        /// that changes the variance (e.g. `*mut T`, `MyStruct<T>`)
-        ty: Ty<'tcx>,
-        /// The index of the generic parameter being used
-        /// (e.g. `0` for `*mut T`, `1` for `MyStruct<'CovariantParam, 'InvariantParam>`)
-        param_index: u32,
-    },
-}
-
-impl<'tcx> VarianceDiagInfo<'tcx> {
-    /// Mirrors `Variance::xform` - used to 'combine' the existing
-    /// and new `VarianceDiagInfo`s when our variance changes.
-    pub fn xform(self, other: VarianceDiagInfo<'tcx>) -> VarianceDiagInfo<'tcx> {
-        // For now, just use the first `VarianceDiagInfo::Invariant` that we see
-        match self {
-            VarianceDiagInfo::None => other,
-            VarianceDiagInfo::Invariant { .. } => self,
-        }
     }
 }
 

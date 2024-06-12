@@ -37,11 +37,11 @@ pub(super) mod canonical;
 mod probe;
 mod select;
 
-pub struct EvalCtxt<
-    'a,
+pub struct EvalCtxt<'a, Infcx, I = <Infcx as InferCtxtLike>::Interner>
+where
     Infcx: InferCtxtLike<Interner = I>,
-    I: Interner = <Infcx as InferCtxtLike>::Interner,
-> {
+    I: Interner,
+{
     /// The inference context that backs (mostly) inference and placeholder terms
     /// instantiated while solving goals.
     ///
@@ -609,8 +609,8 @@ impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
         ty
     }
 
-    pub(super) fn next_const_infer(&mut self, ty: Ty<'tcx>) -> ty::Const<'tcx> {
-        let ct = self.infcx.next_const_var(ty, DUMMY_SP);
+    pub(super) fn next_const_infer(&mut self) -> ty::Const<'tcx> {
+        let ct = self.infcx.next_const_var(DUMMY_SP);
         self.inspect.add_var_value(ct);
         ct
     }
@@ -620,7 +620,7 @@ impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
     pub(super) fn next_term_infer_of_kind(&mut self, kind: ty::Term<'tcx>) -> ty::Term<'tcx> {
         match kind.unpack() {
             ty::TermKind::Ty(_) => self.next_ty_infer().into(),
-            ty::TermKind::Const(ct) => self.next_const_infer(ct.ty()).into(),
+            ty::TermKind::Const(_) => self.next_const_infer().into(),
         }
     }
 
@@ -961,15 +961,15 @@ impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
         param_env: ty::ParamEnv<'tcx>,
         hidden_ty: Ty<'tcx>,
     ) -> Result<(), NoSolution> {
-        let mut obligations = Vec::new();
+        let mut goals = Vec::new();
         self.infcx.insert_hidden_type(
             opaque_type_key,
-            &ObligationCause::dummy(),
+            DUMMY_SP,
             param_env,
             hidden_ty,
-            &mut obligations,
+            &mut goals,
         )?;
-        self.add_goals(GoalSource::Misc, obligations.into_iter().map(|o| o.into()));
+        self.add_goals(GoalSource::Misc, goals);
         Ok(())
     }
 
@@ -980,16 +980,15 @@ impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
         param_env: ty::ParamEnv<'tcx>,
         hidden_ty: Ty<'tcx>,
     ) {
-        let mut obligations = Vec::new();
+        let mut goals = Vec::new();
         self.infcx.add_item_bounds_for_hidden_type(
             opaque_def_id,
             opaque_args,
-            ObligationCause::dummy(),
             param_env,
             hidden_ty,
-            &mut obligations,
+            &mut goals,
         );
-        self.add_goals(GoalSource::Misc, obligations.into_iter().map(|o| o.into()));
+        self.add_goals(GoalSource::Misc, goals);
     }
 
     // Do something for each opaque/hidden pair defined with `def_id` in the
@@ -1037,14 +1036,19 @@ impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
         &self,
         param_env: ty::ParamEnv<'tcx>,
         unevaluated: ty::UnevaluatedConst<'tcx>,
-        ty: Ty<'tcx>,
     ) -> Option<ty::Const<'tcx>> {
         use rustc_middle::mir::interpret::ErrorHandled;
         match self.infcx.const_eval_resolve(param_env, unevaluated, DUMMY_SP) {
-            Ok(Some(val)) => Some(ty::Const::new_value(self.interner(), val, ty)),
+            Ok(Some(val)) => Some(ty::Const::new_value(
+                self.interner(),
+                val,
+                self.interner()
+                    .type_of(unevaluated.def)
+                    .instantiate(self.interner(), unevaluated.args),
+            )),
             Ok(None) | Err(ErrorHandled::TooGeneric(_)) => None,
             Err(ErrorHandled::Reported(e, _)) => {
-                Some(ty::Const::new_error(self.interner(), e.into(), ty))
+                Some(ty::Const::new_error(self.interner(), e.into()))
             }
         }
     }
@@ -1124,7 +1128,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for ReplaceAliasWithInfer<'_, '_, 'tcx> {
     fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
         match ct.kind() {
             ty::ConstKind::Unevaluated(..) if !ct.has_escaping_bound_vars() => {
-                let infer_ct = self.ecx.next_const_infer(ct.ty());
+                let infer_ct = self.ecx.next_const_infer();
                 let normalizes_to = ty::PredicateKind::AliasRelate(
                     ct.into(),
                     infer_ct.into(),

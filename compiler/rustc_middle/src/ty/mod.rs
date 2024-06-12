@@ -60,6 +60,7 @@ use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{ExpnId, ExpnKind, Span};
 use rustc_target::abi::{Align, FieldIdx, Integer, IntegerType, VariantIdx};
 pub use rustc_target::abi::{ReprFlags, ReprOptions};
+pub use rustc_type_ir::relate::VarianceDiagInfo;
 pub use rustc_type_ir::{DebugWithInfcx, InferCtxtLike, WithInfcx};
 use tracing::{debug, instrument};
 pub use vtable::*;
@@ -87,7 +88,7 @@ pub use self::closure::{
     CAPTURE_STRUCT_LOCAL,
 };
 pub use self::consts::{
-    Const, ConstData, ConstInt, ConstKind, Expr, ExprKind, ScalarInt, UnevaluatedConst, ValTree,
+    Const, ConstInt, ConstKind, Expr, ExprKind, ScalarInt, UnevaluatedConst, ValTree,
 };
 pub use self::context::{
     tls, CtxtInterners, CurrentGcx, DeducedParamAttrs, Feed, FreeRegionInfo, GlobalCtxt, Lift,
@@ -114,7 +115,7 @@ pub use self::rvalue_scopes::RvalueScopes;
 pub use self::sty::{
     AliasTy, Article, Binder, BoundTy, BoundTyKind, BoundVariableKind, CanonicalPolyFnSig,
     CoroutineArgsExt, EarlyBinder, FnSig, InlineConstArgs, InlineConstArgsParts, ParamConst,
-    ParamTy, PolyFnSig, TyKind, TypeAndMut, UpvarArgs, VarianceDiagInfo,
+    ParamTy, PolyFnSig, TyKind, TypeAndMut, UpvarArgs,
 };
 pub use self::trait_def::TraitDef;
 pub use self::typeck_results::{
@@ -122,7 +123,6 @@ pub use self::typeck_results::{
     TypeckResults, UserType, UserTypeAnnotationIndex,
 };
 
-pub mod _match;
 pub mod abstract_const;
 pub mod adjustment;
 pub mod cast;
@@ -309,38 +309,6 @@ impl Visibility {
                 }
             }
             ty::Visibility::Public => "pub".to_string(),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable, TyEncodable, TyDecodable)]
-pub enum BoundConstness {
-    /// `Type: Trait`
-    NotConst,
-    /// `Type: const Trait`
-    Const,
-    /// `Type: ~const Trait`
-    ///
-    /// Requires resolving to const only when we are in a const context.
-    ConstIfConst,
-}
-
-impl BoundConstness {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotConst => "",
-            Self::Const => "const",
-            Self::ConstIfConst => "~const",
-        }
-    }
-}
-
-impl fmt::Display for BoundConstness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotConst => f.write_str("normal"),
-            Self::Const => f.write_str("const"),
-            Self::ConstIfConst => f.write_str("~const"),
         }
     }
 }
@@ -617,7 +585,7 @@ impl<'tcx> Term<'tcx> {
                     ptr.cast::<WithCachedTypeInfo<ty::TyKind<'tcx>>>().as_ref(),
                 ))),
                 CONST_TAG => TermKind::Const(ty::Const(Interned::new_unchecked(
-                    ptr.cast::<WithCachedTypeInfo<ty::ConstData<'tcx>>>().as_ref(),
+                    ptr.cast::<WithCachedTypeInfo<ty::ConstKind<'tcx>>>().as_ref(),
                 ))),
                 _ => core::intrinsics::unreachable(),
             }
@@ -933,6 +901,30 @@ impl<'tcx> OpaqueHiddenType<'tcx> {
 pub struct Placeholder<T> {
     pub universe: UniverseIndex,
     pub bound: T,
+}
+impl Placeholder<BoundVar> {
+    pub fn find_const_ty_from_env<'tcx>(self, env: ParamEnv<'tcx>) -> Ty<'tcx> {
+        let mut candidates = env.caller_bounds().iter().filter_map(|clause| {
+            // `ConstArgHasType` are never desugared to be higher ranked.
+            match clause.kind().skip_binder() {
+                ty::ClauseKind::ConstArgHasType(placeholder_ct, ty) => {
+                    assert!(!(placeholder_ct, ty).has_escaping_bound_vars());
+
+                    match placeholder_ct.kind() {
+                        ty::ConstKind::Placeholder(placeholder_ct) if placeholder_ct == self => {
+                            Some(ty)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        });
+
+        let ty = candidates.next().unwrap();
+        assert!(candidates.next().is_none());
+        ty
+    }
 }
 
 pub type PlaceholderRegion = Placeholder<BoundRegion>;

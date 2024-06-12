@@ -41,6 +41,7 @@ use rustc_trait_selection::traits::query::method_autoderef::{
 use rustc_trait_selection::traits::query::CanonicalTyGoal;
 use rustc_trait_selection::traits::ObligationCtxt;
 use rustc_trait_selection::traits::{self, ObligationCause};
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::cmp::max;
 use std::iter;
@@ -76,8 +77,12 @@ pub(crate) struct ProbeContext<'a, 'tcx> {
     /// requested name (by edit distance)
     allow_similar_names: bool,
 
+    /// List of potential private candidates. Will be trimmed to ones that
+    /// actually apply and then the result inserted into `private_candidate`
+    private_candidates: Vec<Candidate<'tcx>>,
+
     /// Some(candidate) if there is a private candidate
-    private_candidate: Option<(DefKind, DefId)>,
+    private_candidate: Cell<Option<(DefKind, DefId)>>,
 
     /// Collects near misses when the candidate functions are missing a `self` keyword and is only
     /// used for error reporting
@@ -301,7 +306,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self_ty: Ty<'tcx>,
         scope_expr_id: HirId,
         scope: ProbeScope,
-    ) -> Vec<Candidate<'tcx>> {
+    ) -> Result<Vec<Candidate<'tcx>>, MethodError<'tcx>> {
         self.probe_op(
             item_name.span,
             mode,
@@ -319,7 +324,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .collect())
             },
         )
-        .unwrap()
     }
 
     pub(crate) fn probe_op<OP, R>(
@@ -581,7 +585,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             orig_steps_var_values,
             steps,
             allow_similar_names: false,
-            private_candidate: None,
+            private_candidates: Vec::new(),
+            private_candidate: Cell::new(None),
             static_candidates: RefCell::new(Vec::new()),
             unsatisfied_predicates: RefCell::new(Vec::new()),
             scope_expr_id,
@@ -593,7 +598,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         self.inherent_candidates.clear();
         self.extension_candidates.clear();
         self.impl_dups.clear();
-        self.private_candidate = None;
+        self.private_candidates.clear();
+        self.private_candidate.set(None);
         self.static_candidates.borrow_mut().clear();
         self.unsatisfied_predicates.borrow_mut().clear();
     }
@@ -617,9 +623,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             } else {
                 self.extension_candidates.push(candidate);
             }
-        } else if self.private_candidate.is_none() {
-            self.private_candidate =
-                Some((candidate.item.kind.as_def_kind(), candidate.item.def_id));
+        } else {
+            self.private_candidates.push(candidate);
         }
     }
 
@@ -1171,7 +1176,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let mut possibly_unsatisfied_predicates = Vec::new();
 
         for (kind, candidates) in
-            &[("inherent", &self.inherent_candidates), ("extension", &self.extension_candidates)]
+            [("inherent", &self.inherent_candidates), ("extension", &self.extension_candidates)]
         {
             debug!("searching {} candidates", kind);
             let res = self.consider_candidates(
@@ -1182,6 +1187,14 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             );
             if let Some(pick) = res {
                 return Some(pick);
+            }
+        }
+
+        if self.private_candidate.get().is_none() {
+            if let Some(Ok(pick)) =
+                self.consider_candidates(self_ty, &self.private_candidates, &mut vec![], None)
+            {
+                self.private_candidate.set(Some((pick.item.kind.as_def_kind(), pick.item.def_id)));
             }
         }
 

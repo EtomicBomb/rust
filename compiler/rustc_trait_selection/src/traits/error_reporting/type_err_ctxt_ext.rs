@@ -611,6 +611,10 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                             &mut err,
                             trait_predicate,
                         );
+                        self.suggest_add_result_as_return_type(&obligation,
+                            &mut err,
+                            trait_ref);
+
                         if self.suggest_add_reference_to_arg(
                             &obligation,
                             &mut err,
@@ -876,55 +880,24 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                         }
                     }
 
-                    ty::PredicateKind::Clause(ty::ClauseKind::ConstEvaluatable(..)) => {
-                        // Errors for `ConstEvaluatable` predicates show up as
-                        // `SelectionError::ConstEvalFailure`,
-                        // not `Unimplemented`.
+                    // Errors for `ConstEvaluatable` predicates show up as
+                    // `SelectionError::ConstEvalFailure`,
+                    // not `Unimplemented`.
+                    ty::PredicateKind::Clause(ty::ClauseKind::ConstEvaluatable(..))
+                    // Errors for `ConstEquate` predicates show up as
+                    // `SelectionError::ConstEvalFailure`,
+                    // not `Unimplemented`.
+                    | ty::PredicateKind::ConstEquate { .. }
+                    // Ambiguous predicates should never error
+                    | ty::PredicateKind::Ambiguous
+                    | ty::PredicateKind::NormalizesTo { .. }
+                    | ty::PredicateKind::AliasRelate { .. }
+                    | ty::PredicateKind::Clause(ty::ClauseKind::ConstArgHasType { .. }) => {
                         span_bug!(
                             span,
-                            "const-evaluatable requirement gave wrong error: `{:?}`",
+                            "Unexpected `Predicate` for `SelectionError`: `{:?}`",
                             obligation
                         )
-                    }
-
-                    ty::PredicateKind::ConstEquate(..) => {
-                        // Errors for `ConstEquate` predicates show up as
-                        // `SelectionError::ConstEvalFailure`,
-                        // not `Unimplemented`.
-                        span_bug!(
-                            span,
-                            "const-equate requirement gave wrong error: `{:?}`",
-                            obligation
-                        )
-                    }
-
-                    ty::PredicateKind::Ambiguous => span_bug!(span, "ambiguous"),
-
-                    ty::PredicateKind::NormalizesTo(..) => span_bug!(
-                        span,
-                        "NormalizesTo predicate should never be the predicate cause of a SelectionError"
-                    ),
-
-                    ty::PredicateKind::AliasRelate(..) => span_bug!(
-                        span,
-                        "AliasRelate predicate should never be the predicate cause of a SelectionError"
-                    ),
-
-                    ty::PredicateKind::Clause(ty::ClauseKind::ConstArgHasType(ct, ty)) => {
-                        let mut diag = self.dcx().struct_span_err(
-                            span,
-                            format!("the constant `{ct}` is not of type `{ty}`"),
-                        );
-                        self.note_type_err(
-                            &mut diag,
-                            &obligation.cause,
-                            None,
-                            None,
-                            TypeError::Sorts(ty::error::ExpectedFound::new(true, ty, ct.ty())),
-                            false,
-                            false,
-                        );
-                        diag
                     }
                 }
             }
@@ -987,6 +960,24 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
             Overflow(_) => {
                 bug!("overflow should be handled before the `report_selection_error` path");
+            }
+
+            SelectionError::ConstArgHasWrongType { ct, ct_ty, expected_ty } => {
+                let mut diag = self.dcx().struct_span_err(
+                    span,
+                    format!("the constant `{ct}` is not of type `{expected_ty}`"),
+                );
+
+                self.note_type_err(
+                    &mut diag,
+                    &obligation.cause,
+                    None,
+                    None,
+                    TypeError::Sorts(ty::error::ExpectedFound::new(true, expected_ty, ct_ty)),
+                    false,
+                    false,
+                );
+                diag
             }
         };
 
@@ -2082,12 +2073,16 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 })
                 .collect();
 
-            let end = if candidates.len() <= 9 { candidates.len() } else { 8 };
+            let end = if candidates.len() <= 9 || self.tcx.sess.opts.verbose {
+                candidates.len()
+            } else {
+                8
+            };
             err.help(format!(
                 "the following {other}types implement trait `{}`:{}{}",
                 trait_ref.print_trait_sugared(),
                 candidates[..end].join(""),
-                if candidates.len() > 9 {
+                if candidates.len() > 9 && !self.tcx.sess.opts.verbose {
                     format!("\nand {} others", candidates.len() - 8)
                 } else {
                     String::new()

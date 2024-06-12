@@ -83,8 +83,8 @@
 //! that contain `AllocId`s.
 
 use rustc_const_eval::const_eval::DummyMachine;
-use rustc_const_eval::interpret::{intern_const_alloc_for_constprop, MemoryKind};
-use rustc_const_eval::interpret::{ImmTy, InterpCx, OpTy, Projectable, Scalar};
+use rustc_const_eval::interpret::{intern_const_alloc_for_constprop, MemPlaceMeta, MemoryKind};
+use rustc_const_eval::interpret::{ImmTy, Immediate, InterpCx, OpTy, Projectable, Scalar};
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::graph::dominators::Dominators;
 use rustc_hir::def::DefKind;
@@ -95,11 +95,11 @@ use rustc_middle::bug;
 use rustc_middle::mir::interpret::GlobalAlloc;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
-use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::layout::{HasParamEnv, LayoutOf};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::def_id::DefId;
 use rustc_span::DUMMY_SP;
-use rustc_target::abi::{self, Abi, Size, VariantIdx, FIRST_VARIANT};
+use rustc_target::abi::{self, Abi, FieldIdx, Size, VariantIdx, FIRST_VARIANT};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
@@ -177,6 +177,12 @@ enum AggregateTy<'tcx> {
     Array,
     Tuple,
     Def(DefId, ty::GenericArgsRef<'tcx>),
+    RawPtr {
+        /// Needed for cast propagation.
+        data_pointer_ty: Ty<'tcx>,
+        /// The data pointer can be anything thin, so doesn't determine the output.
+        output_pointer_ty: Ty<'tcx>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -223,7 +229,6 @@ enum Value<'tcx> {
     NullaryOp(NullOp<'tcx>, Ty<'tcx>),
     UnaryOp(UnOp, VnIndex),
     BinaryOp(BinOp, VnIndex, VnIndex),
-    CheckedBinaryOp(BinOp, VnIndex, VnIndex), // FIXME get rid of this, work like MIR instead
     Cast {
         kind: CastKind,
         value: VnIndex,
@@ -386,11 +391,22 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                     AggregateTy::Def(def_id, args) => {
                         self.tcx.type_of(def_id).instantiate(self.tcx, args)
                     }
+                    AggregateTy::RawPtr { output_pointer_ty, .. } => output_pointer_ty,
                 };
                 let variant = if ty.is_enum() { Some(variant) } else { None };
                 let ty = self.ecx.layout_of(ty).ok()?;
                 if ty.is_zst() {
                     ImmTy::uninit(ty).into()
+                } else if matches!(kind, AggregateTy::RawPtr { .. }) {
+                    // Pointers don't have fields, so don't `project_field` them.
+                    let data = self.ecx.read_pointer(fields[0]).ok()?;
+                    let meta = if fields[1].layout.is_zst() {
+                        MemPlaceMeta::None
+                    } else {
+                        MemPlaceMeta::Meta(self.ecx.read_scalar(fields[1]).ok()?)
+                    };
+                    let ptr_imm = Immediate::new_pointer_with_meta(data, meta, &self.ecx);
+                    ImmTy::from_immediate(ptr_imm, ty).into()
                 } else if matches!(ty.abi, Abi::Scalar(..) | Abi::ScalarPair(..)) {
                     let dest = self.ecx.allocate(ty, MemoryKind::Stack).ok()?;
                     let variant_dest = if let Some(variant) = variant {
@@ -472,7 +488,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let slice = self.evaluated[slice].as_ref()?;
                 let usize_layout = self.ecx.layout_of(self.tcx.types.usize).unwrap();
                 let len = slice.len(&self.ecx).ok()?;
-                let imm = ImmTy::try_from_uint(len, usize_layout)?;
+                let imm = ImmTy::from_uint(len, usize_layout);
                 imm.into()
             }
             NullaryOp(null_op, ty) => {
@@ -485,13 +501,15 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let val = match null_op {
                     NullOp::SizeOf => layout.size.bytes(),
                     NullOp::AlignOf => layout.align.abi.bytes(),
-                    NullOp::OffsetOf(fields) => {
-                        layout.offset_of_subfield(&self.ecx, fields.iter()).bytes()
-                    }
+                    NullOp::OffsetOf(fields) => self
+                        .ecx
+                        .tcx
+                        .offset_of_subfield(self.ecx.param_env(), layout, fields.iter())
+                        .bytes(),
                     NullOp::UbChecks => return None,
                 };
                 let usize_layout = self.ecx.layout_of(self.tcx.types.usize).unwrap();
-                let imm = ImmTy::try_from_uint(val, usize_layout)?;
+                let imm = ImmTy::from_uint(val, usize_layout);
                 imm.into()
             }
             UnaryOp(un_op, operand) => {
@@ -506,17 +524,6 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let rhs = self.evaluated[rhs].as_ref()?;
                 let rhs = self.ecx.read_immediate(rhs).ok()?;
                 let val = self.ecx.binary_op(bin_op, &lhs, &rhs).ok()?;
-                val.into()
-            }
-            CheckedBinaryOp(bin_op, lhs, rhs) => {
-                let lhs = self.evaluated[lhs].as_ref()?;
-                let lhs = self.ecx.read_immediate(lhs).ok()?;
-                let rhs = self.evaluated[rhs].as_ref()?;
-                let rhs = self.ecx.read_immediate(rhs).ok()?;
-                let val = self
-                    .ecx
-                    .binary_op(bin_op.wrapping_to_overflowing().unwrap(), &lhs, &rhs)
-                    .ok()?;
                 val.into()
             }
             Cast { kind, value, from: _, to } => match kind {
@@ -829,17 +836,10 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let lhs = lhs?;
                 let rhs = rhs?;
 
-                if let Some(op) = op.overflowing_to_wrapping() {
-                    if let Some(value) = self.simplify_binary(op, true, ty, lhs, rhs) {
-                        return Some(value);
-                    }
-                    Value::CheckedBinaryOp(op, lhs, rhs)
-                } else {
-                    if let Some(value) = self.simplify_binary(op, false, ty, lhs, rhs) {
-                        return Some(value);
-                    }
-                    Value::BinaryOp(op, lhs, rhs)
+                if let Some(value) = self.simplify_binary(op, ty, lhs, rhs) {
+                    return Some(value);
                 }
+                Value::BinaryOp(op, lhs, rhs)
             }
             Rvalue::UnaryOp(op, ref mut arg) => {
                 let arg = self.simplify_operand(arg, location)?;
@@ -881,10 +881,10 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         rvalue: &mut Rvalue<'tcx>,
         location: Location,
     ) -> Option<VnIndex> {
-        let Rvalue::Aggregate(box ref kind, ref mut fields) = *rvalue else { bug!() };
+        let Rvalue::Aggregate(box ref kind, ref mut field_ops) = *rvalue else { bug!() };
 
         let tcx = self.tcx;
-        if fields.is_empty() {
+        if field_ops.is_empty() {
             let is_zst = match *kind {
                 AggregateKind::Array(..)
                 | AggregateKind::Tuple
@@ -903,13 +903,13 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             }
         }
 
-        let (ty, variant_index) = match *kind {
+        let (mut ty, variant_index) = match *kind {
             AggregateKind::Array(..) => {
-                assert!(!fields.is_empty());
+                assert!(!field_ops.is_empty());
                 (AggregateTy::Array, FIRST_VARIANT)
             }
             AggregateKind::Tuple => {
-                assert!(!fields.is_empty());
+                assert!(!field_ops.is_empty());
                 (AggregateTy::Tuple, FIRST_VARIANT)
             }
             AggregateKind::Closure(did, args)
@@ -920,15 +920,49 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             }
             // Do not track unions.
             AggregateKind::Adt(_, _, _, _, Some(_)) => return None,
-            // FIXME: Do the extra work to GVN `from_raw_parts`
-            AggregateKind::RawPtr(..) => return None,
+            AggregateKind::RawPtr(pointee_ty, mtbl) => {
+                assert_eq!(field_ops.len(), 2);
+                let data_pointer_ty = field_ops[FieldIdx::ZERO].ty(self.local_decls, self.tcx);
+                let output_pointer_ty = Ty::new_ptr(self.tcx, pointee_ty, mtbl);
+                (AggregateTy::RawPtr { data_pointer_ty, output_pointer_ty }, FIRST_VARIANT)
+            }
         };
 
-        let fields: Option<Vec<_>> = fields
+        let fields: Option<Vec<_>> = field_ops
             .iter_mut()
             .map(|op| self.simplify_operand(op, location).or_else(|| self.new_opaque()))
             .collect();
-        let fields = fields?;
+        let mut fields = fields?;
+
+        if let AggregateTy::RawPtr { data_pointer_ty, output_pointer_ty } = &mut ty {
+            let mut was_updated = false;
+
+            // Any thin pointer of matching mutability is fine as the data pointer.
+            while let Value::Cast {
+                kind: CastKind::PtrToPtr,
+                value: cast_value,
+                from: cast_from,
+                to: _,
+            } = self.get(fields[0])
+                && let ty::RawPtr(from_pointee_ty, from_mtbl) = cast_from.kind()
+                && let ty::RawPtr(_, output_mtbl) = output_pointer_ty.kind()
+                && from_mtbl == output_mtbl
+                && from_pointee_ty.is_sized(self.tcx, self.param_env)
+            {
+                fields[0] = *cast_value;
+                *data_pointer_ty = *cast_from;
+                was_updated = true;
+            }
+
+            if was_updated {
+                if let Some(const_) = self.try_as_constant(fields[0]) {
+                    field_ops[FieldIdx::ZERO] = Operand::Constant(Box::new(const_));
+                } else if let Some(local) = self.try_as_local(fields[0], location) {
+                    field_ops[FieldIdx::ZERO] = Operand::Copy(Place::from(local));
+                    self.reused_locals.insert(local);
+                }
+            }
+        }
 
         if let AggregateTy::Array = ty
             && fields.len() > 4
@@ -960,6 +994,9 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             (UnOp::Not, Value::BinaryOp(BinOp::Ne, lhs, rhs)) => {
                 Value::BinaryOp(BinOp::Eq, *lhs, *rhs)
             }
+            (UnOp::PtrMetadata, Value::Aggregate(AggregateTy::RawPtr { .. }, _, fields)) => {
+                return Some(fields[1]);
+            }
             _ => return None,
         };
 
@@ -970,7 +1007,6 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
     fn simplify_binary(
         &mut self,
         op: BinOp,
-        checked: bool,
         lhs_ty: Ty<'tcx>,
         lhs: VnIndex,
         rhs: VnIndex,
@@ -999,22 +1035,39 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         use Either::{Left, Right};
         let a = as_bits(lhs).map_or(Right(lhs), Left);
         let b = as_bits(rhs).map_or(Right(rhs), Left);
+
         let result = match (op, a, b) {
             // Neutral elements.
-            (BinOp::Add | BinOp::BitOr | BinOp::BitXor, Left(0), Right(p))
+            (
+                BinOp::Add
+                | BinOp::AddWithOverflow
+                | BinOp::AddUnchecked
+                | BinOp::BitOr
+                | BinOp::BitXor,
+                Left(0),
+                Right(p),
+            )
             | (
                 BinOp::Add
+                | BinOp::AddWithOverflow
+                | BinOp::AddUnchecked
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::Sub
+                | BinOp::SubWithOverflow
+                | BinOp::SubUnchecked
                 | BinOp::Offset
                 | BinOp::Shl
                 | BinOp::Shr,
                 Right(p),
                 Left(0),
             )
-            | (BinOp::Mul, Left(1), Right(p))
-            | (BinOp::Mul | BinOp::Div, Right(p), Left(1)) => p,
+            | (BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked, Left(1), Right(p))
+            | (
+                BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked | BinOp::Div,
+                Right(p),
+                Left(1),
+            ) => p,
             // Attempt to simplify `x & ALL_ONES` to `x`, with `ALL_ONES` depending on type size.
             (BinOp::BitAnd, Right(p), Left(ones)) | (BinOp::BitAnd, Left(ones), Right(p))
                 if ones == layout.size.truncate(u128::MAX)
@@ -1023,10 +1076,21 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 p
             }
             // Absorbing elements.
-            (BinOp::Mul | BinOp::BitAnd, _, Left(0))
+            (
+                BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked | BinOp::BitAnd,
+                _,
+                Left(0),
+            )
             | (BinOp::Rem, _, Left(1))
             | (
-                BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::BitAnd | BinOp::Shl | BinOp::Shr,
+                BinOp::Mul
+                | BinOp::MulWithOverflow
+                | BinOp::MulUnchecked
+                | BinOp::Div
+                | BinOp::Rem
+                | BinOp::BitAnd
+                | BinOp::Shl
+                | BinOp::Shr,
                 Left(0),
                 _,
             ) => self.insert_scalar(Scalar::from_uint(0u128, layout.size), lhs_ty),
@@ -1038,7 +1102,9 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 self.insert_scalar(Scalar::from_uint(ones, layout.size), lhs_ty)
             }
             // Sub/Xor with itself.
-            (BinOp::Sub | BinOp::BitXor, a, b) if a == b => {
+            (BinOp::Sub | BinOp::SubWithOverflow | BinOp::SubUnchecked | BinOp::BitXor, a, b)
+                if a == b =>
+            {
                 self.insert_scalar(Scalar::from_uint(0u128, layout.size), lhs_ty)
             }
             // Comparison:
@@ -1052,7 +1118,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             _ => return None,
         };
 
-        if checked {
+        if op.is_overflowing() {
             let false_val = self.insert_bool(false);
             Some(self.insert_tuple(vec![result, false_val]))
         } else {
@@ -1082,6 +1148,23 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             return self.new_opaque();
         }
 
+        let mut was_updated = false;
+
+        // If that cast just casts away the metadata again,
+        if let PtrToPtr = kind
+            && let Value::Aggregate(AggregateTy::RawPtr { data_pointer_ty, .. }, _, fields) =
+                self.get(value)
+            && let ty::RawPtr(to_pointee, _) = to.kind()
+            && to_pointee.is_sized(self.tcx, self.param_env)
+        {
+            from = *data_pointer_ty;
+            value = fields[0];
+            was_updated = true;
+            if *data_pointer_ty == to {
+                return Some(fields[0]);
+            }
+        }
+
         if let PtrToPtr | PointerCoercion(MutToConstPointer) = kind
             && let Value::Cast { kind: inner_kind, value: inner_value, from: inner_from, to: _ } =
                 *self.get(value)
@@ -1090,9 +1173,13 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             from = inner_from;
             value = inner_value;
             *kind = PtrToPtr;
+            was_updated = true;
             if inner_from == to {
                 return Some(inner_value);
             }
+        }
+
+        if was_updated {
             if let Some(const_) = self.try_as_constant(value) {
                 *operand = Operand::Constant(Box::new(const_));
             } else if let Some(local) = self.try_as_local(value, location) {
@@ -1108,7 +1195,11 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         // Trivial case: we are fetching a statically known length.
         let place_ty = place.ty(self.local_decls, self.tcx).ty;
         if let ty::Array(_, len) = place_ty.kind() {
-            return self.insert_constant(Const::from_ty_const(*len, self.tcx));
+            return self.insert_constant(Const::from_ty_const(
+                *len,
+                self.tcx.types.usize,
+                self.tcx,
+            ));
         }
 
         let mut inner = self.simplify_place_value(place, location)?;
@@ -1130,7 +1221,11 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             && let Some(to) = to.builtin_deref(true)
             && let ty::Slice(..) = to.kind()
         {
-            return self.insert_constant(Const::from_ty_const(*len, self.tcx));
+            return self.insert_constant(Const::from_ty_const(
+                *len,
+                self.tcx.types.usize,
+                self.tcx,
+            ));
         }
 
         // Fallback: a symbolic `Len`.
@@ -1160,7 +1255,7 @@ fn op_to_prop_const<'tcx>(
     // If this constant has scalar ABI, return it as a `ConstValue::Scalar`.
     if let Abi::Scalar(abi::Scalar::Initialized { .. }) = op.layout.abi
         && let Ok(scalar) = ecx.read_scalar(op)
-        && scalar.try_to_int().is_ok()
+        && scalar.try_to_scalar_int().is_ok()
     {
         return Some(ConstValue::Scalar(scalar));
     }

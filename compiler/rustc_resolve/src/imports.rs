@@ -259,13 +259,18 @@ struct UnresolvedImportError {
 
 // Reexports of the form `pub use foo as bar;` where `foo` is `extern crate foo;`
 // are permitted for backward-compatibility under a deprecation lint.
-fn pub_use_of_private_extern_crate_hack(import: Import<'_>, binding: NameBinding<'_>) -> bool {
+fn pub_use_of_private_extern_crate_hack(
+    import: Import<'_>,
+    binding: NameBinding<'_>,
+) -> Option<NodeId> {
     match (&import.kind, &binding.kind) {
-        (ImportKind::Single { .. }, NameBindingKind::Import { import: binding_import, .. }) => {
-            matches!(binding_import.kind, ImportKind::ExternCrate { .. })
-                && import.expect_vis().is_public()
+        (ImportKind::Single { .. }, NameBindingKind::Import { import: binding_import, .. })
+            if let ImportKind::ExternCrate { id, .. } = binding_import.kind
+                && import.expect_vis().is_public() =>
+        {
+            Some(id)
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -275,7 +280,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
     pub(crate) fn import(&self, binding: NameBinding<'a>, import: Import<'a>) -> NameBinding<'a> {
         let import_vis = import.expect_vis().to_def_id();
         let vis = if binding.vis.is_at_least(import_vis, self.tcx)
-            || pub_use_of_private_extern_crate_hack(import, binding)
+            || pub_use_of_private_extern_crate_hack(import, binding).is_some()
         {
             import_vis
         } else {
@@ -352,9 +357,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     (old_glob @ true, false) | (old_glob @ false, true) => {
                         let (glob_binding, nonglob_binding) =
                             if old_glob { (old_binding, binding) } else { (binding, old_binding) };
-                        if glob_binding.res() != nonglob_binding.res()
-                            && key.ns == MacroNS
+                        if key.ns == MacroNS
                             && nonglob_binding.expansion != LocalExpnId::ROOT
+                            && glob_binding.res() != nonglob_binding.res()
                         {
                             resolution.binding = Some(this.ambiguity(
                                 AmbiguityKind::GlobVsExpanded,
@@ -1253,12 +1258,15 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         // All namespaces must be re-exported with extra visibility for an error to occur.
         if !any_successful_reexport {
             let (ns, binding) = reexport_error.unwrap();
-            if pub_use_of_private_extern_crate_hack(import, binding) {
+            if let Some(extern_crate_id) = pub_use_of_private_extern_crate_hack(import, binding) {
                 self.lint_buffer.buffer_lint(
                     PUB_USE_OF_PRIVATE_EXTERN_CRATE,
                     import_id,
                     import.span,
-                    BuiltinLintDiag::PrivateExternCrateReexport(ident),
+                    BuiltinLintDiag::PrivateExternCrateReexport {
+                        source: ident,
+                        extern_crate_span: self.tcx.source_span(self.local_def_id(extern_crate_id)),
+                    },
                 );
             } else {
                 if ns == TypeNS {

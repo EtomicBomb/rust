@@ -32,6 +32,8 @@ use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::{Diag, EmissionGuarantee};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
+use rustc_infer::infer::relate::MatchAgainstFreshVars;
+use rustc_infer::infer::relate::TypeRelation;
 use rustc_infer::infer::BoundRegionConversionTime;
 use rustc_infer::infer::BoundRegionConversionTime::HigherRankedType;
 use rustc_infer::infer::DefineOpaqueTypes;
@@ -40,10 +42,9 @@ use rustc_middle::bug;
 use rustc_middle::dep_graph::dep_kinds;
 use rustc_middle::dep_graph::DepNodeIndex;
 use rustc_middle::mir::interpret::ErrorHandled;
-use rustc_middle::ty::_match::MatchAgainstFreshVars;
 use rustc_middle::ty::abstract_const::NotConstEvaluatable;
+use rustc_middle::ty::error::TypeErrorToStringExt;
 use rustc_middle::ty::print::PrintTraitRefExt as _;
-use rustc_middle::ty::relate::TypeRelation;
 use rustc_middle::ty::GenericArgsRef;
 use rustc_middle::ty::{self, PolyProjectionPredicate, Upcast};
 use rustc_middle::ty::{Ty, TyCtxt, TypeFoldable, TypeVisitableExt};
@@ -947,7 +948,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                             match self.infcx.try_const_eval_resolve(
                                 obligation.param_env,
                                 unevaluated,
-                                c.ty(),
                                 obligation.cause.span,
                             ) {
                                 Ok(val) => Ok(val),
@@ -995,21 +995,25 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 }
                 ty::PredicateKind::Ambiguous => Ok(EvaluatedToAmbig),
                 ty::PredicateKind::Clause(ty::ClauseKind::ConstArgHasType(ct, ty)) => {
-                    // FIXME(BoxyUwU): Really we should not be calling `ct.ty()` for any variant
-                    // other than `ConstKind::Value`. Unfortunately this would require looking in the
-                    // env for any `ConstArgHasType` assumptions for parameters and placeholders. I
-                    // don't really want to implement this in the old solver so I haven't.
-                    //
-                    // We do still stall on infer vars though as otherwise a goal like:
-                    // `ConstArgHasType(?x: usize, usize)` can succeed even though it might later
-                    // get unified with some const that is not of type `usize`.
                     let ct = self.infcx.shallow_resolve_const(ct);
                     let ct_ty = match ct.kind() {
-                        ty::ConstKind::Infer(ty::InferConst::Var(_)) => {
+                        ty::ConstKind::Infer(_) => {
                             return Ok(EvaluatedToAmbig);
                         }
                         ty::ConstKind::Error(_) => return Ok(EvaluatedToOk),
-                        _ => ct.ty(),
+                        ty::ConstKind::Value(ty, _) => ty,
+                        ty::ConstKind::Unevaluated(uv) => {
+                            self.tcx().type_of(uv.def).instantiate(self.tcx(), uv.args)
+                        }
+                        // FIXME(generic_const_exprs): See comment in `fulfill.rs`
+                        ty::ConstKind::Expr(_) => return Ok(EvaluatedToOk),
+                        ty::ConstKind::Placeholder(_) => {
+                            bug!("placeholder const {:?} in old solver", ct)
+                        }
+                        ty::ConstKind::Bound(_, _) => bug!("escaping bound vars in {:?}", ct),
+                        ty::ConstKind::Param(param_ct) => {
+                            param_ct.find_ty_from_env(obligation.param_env)
+                        }
                     };
 
                     match self.infcx.at(&obligation.cause, obligation.param_env).eq(
@@ -2559,7 +2563,7 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
         let InferOk { obligations, .. } = self
             .infcx
             .at(&cause, obligation.param_env)
-            .eq(DefineOpaqueTypes::Yes, placeholder_obligation_trait_ref, impl_trait_ref)
+            .eq(DefineOpaqueTypes::No, placeholder_obligation_trait_ref, impl_trait_ref)
             .map_err(|e| {
                 debug!("match_impl: failed eq_trait_refs due to `{}`", e.to_string(self.tcx()))
             })?;

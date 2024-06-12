@@ -386,6 +386,26 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
+    pub fn require_type_has_static_alignment(
+        &self,
+        ty: Ty<'tcx>,
+        span: Span,
+        code: traits::ObligationCauseCode<'tcx>,
+    ) {
+        if !ty.references_error() {
+            let tail =
+                self.tcx.struct_tail_with_normalize(ty, |ty| self.normalize(span, ty), || {});
+            // Sized types have static alignment, and so do slices.
+            if tail.is_trivially_sized(self.tcx) || matches!(tail.kind(), ty::Slice(..)) {
+                // Nothing else is required here.
+            } else {
+                // We can't be sure, let's required full `Sized`.
+                let lang_item = self.tcx.require_lang_item(LangItem::Sized, None);
+                self.require_type_meets(ty, span, code, lang_item);
+            }
+        }
+    }
+
     pub fn register_bound(
         &self,
         ty: Ty<'tcx>,
@@ -436,7 +456,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub fn lower_array_length(&self, length: &hir::ArrayLen<'tcx>) -> ty::Const<'tcx> {
         match length {
-            hir::ArrayLen::Infer(inf) => self.ct_infer(self.tcx.types.usize, None, inf.span),
+            hir::ArrayLen::Infer(inf) => self.ct_infer(None, inf.span),
             hir::ArrayLen::Body(anon_const) => {
                 let span = self.tcx.def_span(anon_const.def_id);
                 let c = ty::Const::from_anon_const(self.tcx, anon_const.def_id);
@@ -1066,7 +1086,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     ty::ImplContainer => {
                         if segments.len() == 1 {
                             // `<T>::assoc` will end up here, and so
-                            // can `T::assoc`. It this came from an
+                            // can `T::assoc`. If this came from an
                             // inherent impl, we need to record the
                             // `T` for posterity (see `UserSelfTy` for
                             // details).
@@ -1292,20 +1312,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         &GenericParamDefKind::Const { has_default, is_host_effect },
                         GenericArg::Infer(inf),
                     ) => {
-                        let tcx = self.fcx.tcx();
-
                         if has_default && is_host_effect {
                             self.fcx.var_for_effect(param)
                         } else {
-                            self.fcx
-                                .ct_infer(
-                                    tcx.type_of(param.def_id)
-                                        .no_bound_vars()
-                                        .expect("const parameter types cannot be generic"),
-                                    Some(param),
-                                    inf.span,
-                                )
-                                .into()
+                            self.fcx.ct_infer(Some(param), inf.span).into()
                         }
                     }
                     _ => unreachable!(),
@@ -1416,11 +1426,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ) {
                 Ok(ok) => self.register_infer_ok_obligations(ok),
                 Err(_) => {
-                    self.dcx().span_delayed_bug(
+                    self.dcx().span_bug(
                         span,
                         format!(
-                        "instantiate_value_path: (UFCS) {self_ty:?} was a subtype of {impl_ty:?} but now is not?",
-                    ),
+                            "instantiate_value_path: (UFCS) {self_ty:?} was a subtype of {impl_ty:?} but now is not?",
+                        ),
                     );
                 }
             }

@@ -32,7 +32,7 @@ use std::hash::{Hash, Hasher};
 
 pub use self::select::{EvaluationCache, EvaluationResult, OverflowError, SelectionCache};
 // FIXME: Remove this import and import via `solve::`
-pub use rustc_next_trait_solver::solve::BuiltinImplSource;
+pub use rustc_type_ir::solve::BuiltinImplSource;
 
 /// Depending on the stage of compilation, we want projection to be
 /// more or less conservative.
@@ -616,6 +616,8 @@ pub enum SelectionError<'tcx> {
     /// We can thus not know whether the hidden type implements an auto trait, so
     /// we should not presume anything about it.
     OpaqueTypeAutoTraitLeakageUnknown(DefId),
+    /// Error for a `ConstArgHasType` goal
+    ConstArgHasWrongType { ct: ty::Const<'tcx>, ct_ty: Ty<'tcx>, expected_ty: Ty<'tcx> },
 }
 
 #[derive(Clone, Debug, TypeVisitable)]

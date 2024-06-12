@@ -7,11 +7,11 @@ use rustc_type_ir::{self as ty, InferCtxtLike, Interner};
 // EAGER RESOLUTION
 
 /// Resolves ty, region, and const vars to their inferred values or their root vars.
-pub struct EagerResolver<
-    'a,
+pub struct EagerResolver<'a, Infcx, I = <Infcx as InferCtxtLike>::Interner>
+where
     Infcx: InferCtxtLike<Interner = I>,
-    I: Interner = <Infcx as InferCtxtLike>::Interner,
-> {
+    I: Interner,
+{
     infcx: &'a Infcx,
 }
 
@@ -58,8 +58,7 @@ impl<Infcx: InferCtxtLike<Interner = I>, I: Interner> TypeFolder<I> for EagerRes
     fn fold_const(&mut self, c: I::Const) -> I::Const {
         match c.kind() {
             ty::ConstKind::Infer(ty::InferConst::Var(vid)) => {
-                let ty = c.ty().fold_with(self);
-                let resolved = self.infcx.opportunistic_resolve_ct_var(vid, ty);
+                let resolved = self.infcx.opportunistic_resolve_ct_var(vid);
                 if c != resolved && resolved.has_infer() {
                     resolved.fold_with(self)
                 } else {
@@ -67,9 +66,7 @@ impl<Infcx: InferCtxtLike<Interner = I>, I: Interner> TypeFolder<I> for EagerRes
                 }
             }
             ty::ConstKind::Infer(ty::InferConst::EffectVar(vid)) => {
-                let bool = Ty::new_bool(self.infcx.interner());
-                debug_assert_eq!(c.ty(), bool);
-                self.infcx.opportunistic_resolve_effect_var(vid, bool)
+                self.infcx.opportunistic_resolve_effect_var(vid)
             }
             _ => {
                 if c.has_infer() {

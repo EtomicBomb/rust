@@ -101,9 +101,9 @@ impl<'tcx> ConstToPat<'tcx> {
         // level of indirection can be eliminated
 
         let have_valtree =
-            matches!(cv, mir::Const::Ty(c) if matches!(c.kind(), ty::ConstKind::Value(_)));
+            matches!(cv, mir::Const::Ty(_, c) if matches!(c.kind(), ty::ConstKind::Value(_, _)));
         let inlined_const_as_pat = match cv {
-            mir::Const::Ty(c) => match c.kind() {
+            mir::Const::Ty(_, c) => match c.kind() {
                 ty::ConstKind::Param(_)
                 | ty::ConstKind::Infer(_)
                 | ty::ConstKind::Bound(_, _)
@@ -113,8 +113,8 @@ impl<'tcx> ConstToPat<'tcx> {
                 | ty::ConstKind::Expr(_) => {
                     span_bug!(self.span, "unexpected const in `to_pat`: {:?}", c.kind())
                 }
-                ty::ConstKind::Value(valtree) => {
-                    self.recur(valtree, cv.ty()).unwrap_or_else(|_: FallbackToOpaqueConst| {
+                ty::ConstKind::Value(ty, valtree) => {
+                    self.recur(valtree, ty).unwrap_or_else(|_: FallbackToOpaqueConst| {
                         Box::new(Pat {
                             span: self.span,
                             ty: cv.ty(),
@@ -282,8 +282,7 @@ impl<'tcx> ConstToPat<'tcx> {
             }
             ty::Adt(adt_def, args) if adt_def.is_enum() => {
                 let (&variant_index, fields) = cv.unwrap_branch().split_first().unwrap();
-                let variant_index =
-                    VariantIdx::from_u32(variant_index.unwrap_leaf().try_to_u32().ok().unwrap());
+                let variant_index = VariantIdx::from_u32(variant_index.unwrap_leaf().to_u32());
                 PatKind::Variant {
                     adt_def: *adt_def,
                     args,
@@ -336,9 +335,9 @@ impl<'tcx> ConstToPat<'tcx> {
             ty::Ref(_, pointee_ty, ..) => match *pointee_ty.kind() {
                 // `&str` is represented as a valtree, let's keep using this
                 // optimization for now.
-                ty::Str => {
-                    PatKind::Constant { value: mir::Const::Ty(ty::Const::new_value(tcx, cv, ty)) }
-                }
+                ty::Str => PatKind::Constant {
+                    value: mir::Const::Ty(ty, ty::Const::new_value(tcx, cv, ty)),
+                },
                 // All other references are converted into deref patterns and then recursively
                 // convert the dereferenced constant to a pattern that is the sub-pattern of the
                 // deref pattern.
@@ -371,8 +370,8 @@ impl<'tcx> ConstToPat<'tcx> {
                 let v = cv.unwrap_leaf();
                 let is_nan = match flt {
                     ty::FloatTy::F16 => unimplemented!("f16_f128"),
-                    ty::FloatTy::F32 => v.try_to_f32().unwrap().is_nan(),
-                    ty::FloatTy::F64 => v.try_to_f64().unwrap().is_nan(),
+                    ty::FloatTy::F32 => v.to_f32().is_nan(),
+                    ty::FloatTy::F64 => v.to_f64().is_nan(),
                     ty::FloatTy::F128 => unimplemented!("f16_f128"),
                 };
                 if is_nan {
@@ -382,13 +381,15 @@ impl<'tcx> ConstToPat<'tcx> {
                     self.saw_const_match_error.set(Some(e));
                     return Err(FallbackToOpaqueConst);
                 } else {
-                    PatKind::Constant { value: mir::Const::Ty(ty::Const::new_value(tcx, cv, ty)) }
+                    PatKind::Constant {
+                        value: mir::Const::Ty(ty, ty::Const::new_value(tcx, cv, ty)),
+                    }
                 }
             }
             ty::Pat(..) | ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::RawPtr(..) => {
                 // The raw pointers we see here have been "vetted" by valtree construction to be
                 // just integers, so we simply allow them.
-                PatKind::Constant { value: mir::Const::Ty(ty::Const::new_value(tcx, cv, ty)) }
+                PatKind::Constant { value: mir::Const::Ty(ty, ty::Const::new_value(tcx, cv, ty)) }
             }
             ty::FnPtr(..) => {
                 unreachable!(
