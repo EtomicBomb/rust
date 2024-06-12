@@ -136,6 +136,12 @@ fn write_static_files(
     Ok(())
 }
 
+/// None if more than or fewer than one element in `items`
+fn only_element<T>(mut items: Vec<T>) -> Option<T> {
+    let ret = items.pop()?;
+    items.is_empty().then_some(ret)
+}
+
 // FIXME: this fixes only rustdoc part of instability of trait impls for js files, see #120371
 /// Prerenedered json. Arrays and objects are sorted by their string representation of each
 /// entry.
@@ -156,6 +162,10 @@ impl SortedJson {
     fn array<I: IntoIterator<Item=SortedJson>>(items: I) -> Self {
         let mut items: Vec<_> = items.into_iter().collect();
         items.sort_unstable();
+        SortedJson(format!("[{}]", items.into_iter().format(",")))
+    }
+
+    fn array_unsorted<I: IntoIterator<Item=SortedJson>>(items: I) -> Self {
         SortedJson(format!("[{}]", items.into_iter().format(",")))
     }
 
@@ -265,6 +275,16 @@ impl NamedArtifact for SearchIndex {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
+struct SearchDesc;
+type SearchDescPart = Part<SearchIndex, String>;
+impl NamedArtifact for SearchDesc {
+    const NAME: &'static str = "search-desc";
+}
+impl SearchDesc {
+    const PATH: &'static str = "search.desc";
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct AllCrates;
 type AllCratesPart = Part<AllCrates, SortedJson>;
 impl NamedArtifact for AllCrates {
@@ -352,6 +372,17 @@ else if (window.initSearch) window.initSearch(searchIndex);
 #"))?;
         }
     }
+
+    let search_desc = PathBuf::from_iter([&cx.dst, Path::new(SearchDesc::PATH)]);
+    if Path::new(&search_desc).exists() {
+        try_err!(fs::remove_dir_all(&search_desc), &search_desc);
+    }
+    for (path, part) in SearchDescPart::read_merged_parts(&cx.dst, invocations)? {
+        let part = try_err!(only_element(part.items).ok_or("not one shard in part"), &path);
+        write_create_parents(cx, path, part)?;
+    }
+
+    // TODO remove the directory
 
     if emit_invocation_specific {
         for (path, part) in AllCratesPart::read_merged_parts(&cx.dst, invocations)? {
@@ -594,7 +625,7 @@ impl Hierarchy {
             let files = files.iter().map(|s| SortedJson::serialize(s.to_str().expect("invalid osstring")));
             out.push(SortedJson::array(files));
         }
-        SortedJson::array(out)
+        SortedJson::array_unsorted(out)
     }
 
     fn add_path(self: &Rc<Self>, path: &Path) {
@@ -672,29 +703,18 @@ fn write_parts(
     let part = SearchIndexPart::one(SortedJson::serialize(&index));
     PathParts::<SearchIndexPart>::with(path, part).write(cx, invocation)?;
 
-    let search_desc_dir = cx.dst.join(format!("search.desc/{crate_name}"));
-    if Path::new(&search_desc_dir).exists() {
-        try_err!(std::fs::remove_dir_all(&search_desc_dir), &search_desc_dir);
-    }
-    try_err!(std::fs::create_dir_all(&search_desc_dir), &search_desc_dir);
-    for (i, (_, data)) in desc.into_iter().enumerate() {
-        let output_filename = static_files::suffix_path(
-            &format!("{crate_name}-desc-{i}-.js"),
+    let mut parts = PathParts::<SearchDescPart>::default();
+    for (i, (_, part)) in desc.into_iter().enumerate() {
+        let path = PathBuf::from(static_files::suffix_path(
+            &format!("{}/{crate_name}/{crate_name}-desc-{i}-.js", SearchDesc::PATH),
             &cx.shared.resource_suffix,
-        );
-        let path = search_desc_dir.join(output_filename);
-        try_err!(
-            std::fs::write(
-                &path,
-                &format!(
-                    r##"searchState.loadedDescShard({encoded_crate_name}, {i}, {data})"##,
-                    data = serde_json::to_string(&data).unwrap(),
-                )
-                .into_bytes()
-            ),
-            &path
-        );
+        ));
+        let part = SortedJson::serialize(&part);
+        let part = format!("searchState.loadedDescShard({encoded_crate_name}, {i}, {part})");
+        let part = SearchDescPart::one(part);
+        parts.push(path, part);
     }
+    parts.write(cx, invocation)?;
 
     let cloned_shared = Rc::clone(&cx.shared);
     let cache = &cloned_shared.cache;
