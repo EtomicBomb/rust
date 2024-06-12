@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
-use std::marker::PhantomData;
+use std:: marker::PhantomData;
 use std::cell::RefCell;
 use std::fs::{self, read_dir};
 use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::fmt::{self, Display};
-use std::ops::Deref;
 use std::ffi::OsString;
 
 use indexmap::IndexMap;
@@ -65,6 +64,7 @@ pub(super) fn write_shared(
     Ok(())
 }
 
+/// Creates the parts files, does not generate any of the shared artifacts
 pub(super) fn write_no_merge_parts(
     cx: &mut Context<'_>,
     krate: &Crate,
@@ -77,6 +77,7 @@ pub(super) fn write_no_merge_parts(
     Ok(())
 }
 
+/// Generates the shared artifacts from the parts files
 pub(super) fn link(
     cx: &mut Context<'_>,
     invocations: &[InvocationIdentifier],
@@ -89,6 +90,7 @@ pub(super) fn link(
     Ok(())
 }
 
+/// Writes the static files, the style files, and the css extensions
 fn write_static_files(
     cx: &mut Context<'_>,
     options: &RenderOptions,
@@ -138,32 +140,26 @@ fn write_static_files(
 /// Prerenedered json. Arrays and objects are sorted by their string representation of each
 /// entry.
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Default, Serialize, Deserialize)]
-struct SortedJson<T>(T);
+struct SortedJson(String);
 
-impl<T: Deref> SortedJson<T> {
-    fn as_deref(&self) -> SortedJson<&<T as Deref>::Target> {
-        SortedJson(self.0.deref())
-    }
-}
-
-impl<T: Display> Display for SortedJson<T> {
+impl Display for SortedJson {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl SortedJson<String> {
+impl SortedJson {
     fn serialize<T: Serialize>(item: T) -> Self {
         SortedJson(serde_json::to_string(&item).unwrap())
     }
 
-    fn array<T: Display + Ord, I: IntoIterator<Item=SortedJson<T>>>(items: I) -> Self {
+    fn array<I: IntoIterator<Item=SortedJson>>(items: I) -> Self {
         let mut items: Vec<_> = items.into_iter().collect();
         items.sort_unstable();
         SortedJson(format!("[{}]", items.into_iter().format(",")))
     }
 
-    fn object<K: Display, V: Display, I: IntoIterator<Item=(K, SortedJson<V>)>>(items: I) -> Self {
+    fn object<I: IntoIterator<Item=(SortedJson, SortedJson)>>(items: I) -> Self {
         let mut items: Vec<String> = items.into_iter().map(|(k, v)| format!("{k}:{v}")).collect();
         items.sort_unstable();
         SortedJson(format!("{{{}}}", items.into_iter().format(",")))
@@ -171,7 +167,7 @@ impl SortedJson<String> {
 }
 
 // TODO: is this just the crate name
-/// Identifies a particular run of rustdoc
+/// Identifies a particular run of rustdoc. The crate name.
 pub struct InvocationIdentifier(String);
 
 fn get_all_invocations(doc_root: &Path) -> Result<Vec<InvocationIdentifier>, Error> {
@@ -186,7 +182,7 @@ fn get_all_invocations(doc_root: &Path) -> Result<Vec<InvocationIdentifier>, Err
         .collect()
 }
 
-/// Paths (relative to `doc/`) and their pre-merge contents 
+/// Paths (relative to `doc/`) and their pre-merge contents
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 struct PathParts<P> {
@@ -201,8 +197,8 @@ impl<P> Default for PathParts<P> {
 
 impl<T, U> PathParts<Part<T, U>> {
     fn push(
-        &mut self, 
-        path: PathBuf, 
+        &mut self,
+        path: PathBuf,
         part: Part<T, U>,
     ) {
         self.parts.push((path, part));
@@ -228,7 +224,7 @@ impl<T: NamedArtifact, U: Serialize> PathParts<Part<T, U>> {
 struct Part<T, U> {
     #[serde(skip)]
     _artifact: PhantomData<T>,
-    items: Vec<U>, 
+    items: Vec<U>,
 }
 
 impl<T: NamedArtifact + for <'a> Deserialize<'a> + Default, U: for <'a> Deserialize<'a> + Default> Part<T, U> {
@@ -256,47 +252,47 @@ trait NamedArtifact {
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct Sources;
-type SourcesPart = Part<Sources, SortedJson<String>>;
+type SourcesPart = Part<Sources, SortedJson>;
 impl NamedArtifact for Sources {
-    const NAME: &'static str = "sources";
+    const NAME: &'static str = "src-files-js";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct SearchIndex;
-type SearchIndexPart = Part<SearchIndex, SortedJson<String>>;
+type SearchIndexPart = Part<SearchIndex, SortedJson>;
 impl NamedArtifact for SearchIndex {
-    const NAME: &'static str = "search-index";
+    const NAME: &'static str = "search-index-js";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct AllCrates;
-type AllCratesPart = Part<AllCrates, SortedJson<String>>;
+type AllCratesPart = Part<AllCrates, SortedJson>;
 impl NamedArtifact for AllCrates {
-    const NAME: &'static str = "all-crates";
+    const NAME: &'static str = "crates-js";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct CratesIndex;
 type CratesIndexPart = Part<CratesIndex, String>;
 impl NamedArtifact for CratesIndex {
-    const NAME: &'static str = "crates-index";
+    const NAME: &'static str = "index-html";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TypeAlias;
-type TypeAliasPart = Part<TypeAlias, (SortedJson<String>, SortedJson<String>)>;
+type TypeAliasPart = Part<TypeAlias, (SortedJson, SortedJson)>;
 impl NamedArtifact for TypeAlias {
-    const NAME: &'static str = "type-alias";
+    const NAME: &'static str = "type-impl";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TraitAlias;
-type TraitAliasPart = Part<TraitAlias, (SortedJson<String>, SortedJson<String>)>;
+type TraitAliasPart = Part<TraitAlias, (SortedJson, SortedJson)>;
 impl NamedArtifact for TraitAlias {
-    const NAME: &'static str = "trait-alias";
+    const NAME: &'static str = "trait-impl";
 }
 
-fn render_index_html(part: &CratesIndexPart, shared: &SharedContext<'_>) -> String {
+fn render_index_html(part: CratesIndexPart, shared: &SharedContext<'_>) -> String {
     let page = layout::Page {
         title: "Index of crates",
         css_class: "mod sys",
@@ -310,10 +306,10 @@ fn render_index_html(part: &CratesIndexPart, shared: &SharedContext<'_>) -> Stri
     let style_files = &shared.style_files;
     let content = format!(
         "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
-        part.items.iter().format_with("", |k, f| {
+        part.items.into_iter().format_with("", |k, f| {
             f(&format_args!(
                 "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
-                trailing_slash = ensure_trailing_slash(k),
+                trailing_slash = ensure_trailing_slash(&k),
             ))
         })
     );
@@ -333,12 +329,11 @@ fn write_merged(
     invocations: &[InvocationIdentifier],
 ) -> Result<(), Error> {
 
-    // InvocationSpecific resources should always be dynamic.
     let emit_invocation_specific = options.emit.is_empty() || options.emit.contains(&EmitType::InvocationSpecific);
 
     if cx.include_sources && emit_invocation_specific {
         for (path, part) in SourcesPart::read_merged_parts(&cx.dst, invocations)? {
-            let sources = SortedJson::array(part.items.iter().map(|e| e.as_deref()));
+            let sources = SortedJson::array(part.items.into_iter());
             // This needs to be `var`, not `const`.
             // This variable needs declared in the current global scope so that if
             // src-script.js loads first, it can pick it up.
@@ -349,7 +344,7 @@ fn write_merged(
 
     if emit_invocation_specific {
         for (path, part) in SearchIndexPart::read_merged_parts(&cx.dst, invocations)? {
-            let all_indexes = SortedJson::array(part.items.iter().map(|e| e.as_deref()));
+            let all_indexes = SortedJson::array(part.items.into_iter());
             write_create_parents(cx, path, format!(r"#
 var searchIndex = new Map({all_indexes});
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
@@ -360,7 +355,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
 
     if emit_invocation_specific {
         for (path, part) in AllCratesPart::read_merged_parts(&cx.dst, invocations)? {
-            let crates = SortedJson::array(part.items.iter().map(|krate| krate.as_deref()).collect::<Vec<_>>());
+            let crates = SortedJson::array(part.items.into_iter());
             write_create_parents(cx, path, format!("window.ALL_CRATES = {crates};"))?;
         }
     }
@@ -374,7 +369,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
                 crate::markdown::render(&index_page, md_opts, cx.shared.edition())
                     .map_err(|e| Error::new(e, &index_page))?;
             } else {
-                let part = render_index_html(&part, &cx.shared);
+                let part = render_index_html(part, &cx.shared);
                 write_create_parents(cx, path, part)?;
             }
         }
@@ -393,13 +388,13 @@ if (window.{register}) {{
     };
 
     for (path, part) in TypeAliasPart::read_merged_parts(&cx.dst, invocations)? {
-        let part = SortedJson::object(part.items.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let part = SortedJson::object(part.items.into_iter());
         write_create_parents(cx, path, implementors_iife("type_impls", "register_type_impls", "pending_type_impls", part))?;
-        
+
     }
 
     for (path, part) in TraitAliasPart::read_merged_parts(&cx.dst, invocations)? {
-        let part = SortedJson::object(part.items.iter().map(|(k, v)| (k.as_deref(), v.as_deref())));
+        let part = SortedJson::object(part.items.into_iter());
         write_create_parents(cx, path, implementors_iife("implementors", "register_implementors", "pending_implementors", part))?;
     }
 
@@ -586,7 +581,7 @@ impl Hierarchy {
         Self { elem, parent: Rc::downgrade(parent), ..Self::default() }
     }
 
-    fn to_json_string(&self) -> SortedJson<String> {
+    fn to_json_string(&self) -> SortedJson {
         let subs = self.children.borrow();
         let files = self.elems.borrow();
         let name = SortedJson::serialize(self.elem.to_str().expect("invalid osstring conversion"));
