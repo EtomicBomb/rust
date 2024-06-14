@@ -589,6 +589,8 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
 
             write_parts(&mut cx, &krate, index)?;
             if !options.no_merge_parts {
+                // TODO:
+//                 let invocations = cx.shared.cache.extern_locations;
                 let invocations = all_documented_crates(&cx.dst)?;
                 write_static_files(&mut cx, &md_opts)?;
                 write_merged(&mut cx, &md_opts, &invocations)?;
