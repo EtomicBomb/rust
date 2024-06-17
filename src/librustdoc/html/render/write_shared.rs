@@ -177,13 +177,16 @@ struct Part<T, U> {
 }
 
 impl<T: NamedCrossCrateInformation + DeserializeOwned, U: DeserializeOwned> Part<T, U> {
-    fn read_merged_parts(parts_paths: &[PathToCrateParts]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
+    /// Yields a fully qualified path and the collected parts that should be rendered and
+    /// written there.
+    fn read_merged_parts(cx: &Context<'_>, parts_paths: &[PathToCrateParts]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
         let mut ret: FxHashMap<PathBuf, Vec<U>> = Default::default();
         for parts_path in parts_paths {
             let path = parts_path.0.join(T::NAME);
             let parts = try_err!(fs::read(&path), &path);
             let parts: PartsAndLocations::<Self> = try_err!(serde_json::from_slice(&parts), &path);
             for (path, part) in parts.parts {
+                let path = cx.dst.join(path);
                 ret.entry(path).or_default().push(part.item);
             }
         }
@@ -273,7 +276,7 @@ pub(crate) fn write_merged(
     let emit_invocation_specific = options.emit.is_empty() || options.emit.contains(&EmitType::InvocationSpecific);
 
     if cx.include_sources && emit_invocation_specific {
-        for (path, part) in SourcesPart::read_merged_parts(parts_paths)? {
+        for (path, part) in SourcesPart::read_merged_parts(cx, parts_paths)? {
             let sources = SortedJson::array(part.into_iter());
             // This needs to be `var`, not `const`.
             // This variable needs declared in the current global scope so that if
@@ -284,7 +287,7 @@ pub(crate) fn write_merged(
     }
 
     if emit_invocation_specific {
-        for (path, part) in SearchIndexPart::read_merged_parts(parts_paths)? {
+        for (path, part) in SearchIndexPart::read_merged_parts(cx, parts_paths)? {
             let all_indexes = SortedJson::array(part.into_iter());
             write_create_parents(cx, path, format!(r"#
 var searchIndex = new Map({all_indexes});
@@ -298,20 +301,20 @@ else if (window.initSearch) window.initSearch(searchIndex);
     if Path::new(&search_desc).exists() {
         try_err!(fs::remove_dir_all(&search_desc), &search_desc);
     }
-    for (path, part) in SearchDescPart::read_merged_parts(parts_paths)? {
+    for (path, part) in SearchDescPart::read_merged_parts(cx, parts_paths)? {
         let part = try_err!(only_element(part).ok_or("not one shard in part"), &path);
         write_create_parents(cx, path, part)?;
     }
 
     if emit_invocation_specific {
-        for (path, part) in AllCratesPart::read_merged_parts(parts_paths)? {
+        for (path, part) in AllCratesPart::read_merged_parts(cx, parts_paths)? {
             let crates = SortedJson::array(part.into_iter());
             write_create_parents(cx, path, format!("window.ALL_CRATES = {crates};"))?;
         }
     }
 
     if options.enable_index_page {
-        for (path, parts) in CratesIndexPart::read_merged_parts(parts_paths)? {
+        for (path, parts) in CratesIndexPart::read_merged_parts(cx, parts_paths)? {
             if let Some(index_page) = options.index_page.clone() {
                 let mut md_opts = options.clone();
                 md_opts.output = cx.dst.clone();
@@ -346,7 +349,7 @@ else if (window.initSearch) window.initSearch(searchIndex);
     }
 
     let implementors_iife = |impls, register, pending, json| {
-            format!(r"#(function() {{
+            format!(r"(function() {{
 var {impls} = {json};
 if (window.{register}) {{
     window.{register}({impls});
@@ -354,15 +357,16 @@ if (window.{register}) {{
     window.{pending} = {impls};
 }}
 }})();
-#")
+")
     };
 
-    for (path, part) in TypeAliasPart::read_merged_parts(parts_paths)? {
+    for (path, part) in TypeAliasPart::read_merged_parts(cx, parts_paths)? {
         let part = SortedJson::object(part.into_iter());
         write_create_parents(cx, path, implementors_iife("type_impls", "register_type_impls", "pending_type_impls", part))?;
     }
 
-    for (path, part) in TraitAliasPart::read_merged_parts(parts_paths)? {
+
+    for (path, part) in TraitAliasPart::read_merged_parts(cx, parts_paths)? {
         let part = SortedJson::object(part.into_iter());
         write_create_parents(cx, path, implementors_iife("implementors", "register_implementors", "pending_implementors", part))?;
     }
