@@ -11,12 +11,10 @@ use itertools::Itertools as _;
 /// Must use serde_json with the preserve_order feature.
 ///
 /// Both the Display and serde_json::to_string implementations write the serialized json
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(from = "Value")]
 #[serde(into = "Value")]
-pub struct SortedJson {
-    encoded: String,
-}
+pub struct SortedJson(String);
 
 impl SortedJson {
     /// If you pass in an array, it will not be sorted.
@@ -35,27 +33,27 @@ impl SortedJson {
 
     pub fn object<I: IntoIterator<Item=(SortedJson, SortedJson)>>(items: I) -> Self {
         let items = items
-            .sorted_unstable_by_key(|item| item.0)
+            .into_iter()
+            .sorted_unstable_by(|a, b| a.0.cmp(&b.0))
             .format_with(",", |(k, v), f| f(&format_args!("{k}:{v}")));
         SortedJson(format!("{{{}}}", items))
     }
 }
 
 impl fmt::Display for SortedJson {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.encoded)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
 impl From<Value> for SortedJson {
     fn from(value: Value) -> Self {
-        let encoded = serde_json::to_string(&value);
-        SortedJson { encoded }
+        SortedJson(serde_json::to_string(&value).unwrap())
     }
 }
 
 impl From<SortedJson> for Value {
     fn from(json: SortedJson) -> Self {
-        serde_json::from_str(&json.encoded).unwrap()
+        serde_json::from_str(&json.0).unwrap()
     }
 }

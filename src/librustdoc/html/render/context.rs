@@ -15,7 +15,7 @@ use rustc_span::{sym, FileName, Symbol};
 
 use super::print_item::{full_path, item_path, print_item};
 use super::search_index::build_index;
-use super::write_shared::{write_parts, all_documented_crates, write_static_files, write_merged};
+use super::write_shared::{PathToCrateParts, write_parts, write_static_files, write_merged};
 use super::{
     collect_spans_and_sources, scrape_examples_help,
     sidebar::print_sidebar,
@@ -587,13 +587,14 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             let lock_file = cx.dst.join(".lock");
             let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
 
-            write_parts(&mut cx, &krate, index)?;
+            let invocation = PathToCrateParts::new(&cx, ExternalCrate::LOCAL);
+            write_parts(&mut cx, &krate, &invocation, index)?;
+
             if !options.no_merge_parts {
-                // TODO:
-//                 let invocations = cx.shared.cache.extern_locations;
-                let invocations = all_documented_crates(&cx.dst)?;
-                write_static_files(&mut cx, &md_opts)?;
+                let mut invocations = PathToCrateParts::all_documented_crates(&cx);
+                invocations.push(invocation);
                 write_merged(&mut cx, &md_opts, &invocations)?;
+                write_static_files(&mut cx, &md_opts)?;
             }
             Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(false);
         }
