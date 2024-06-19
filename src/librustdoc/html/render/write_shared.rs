@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Rustdoc writes out two kinds of shared files:
 //!  - Static files, which are embedded in the rustdoc binary and are written with a
 //!    filename that includes a hash of their contents. These will always have a new
@@ -13,11 +12,6 @@
 //!    cache with `Cache-Control: immutable`. They include the contents of the
 //!    --resource-suffix flag and are emitted when --emit-type is empty (default)
 //!    or contains "invocation-specific".
-
-// TODO:
-// * inspect `doc/.parts by making invocation have paths relative to each directory
-// * deps?
-// * seems like int's still egenerating index.html in everything
 
 use std:: marker::PhantomData;
 use std::cell::RefCell;
@@ -607,7 +601,7 @@ pub(crate) fn write_parts(
         hierarchy.add_path(source);
     }
     let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
-    PartsAndLocations::<SourcesPart>::with(path, SortedJson::serialize(&crate_name)).write(cx, parts_path)?;
+    PartsAndLocations::<SourcesPart>::with(path, hierarchy.to_json_string()).write(cx, parts_path)?;
 
     // Update the search index and crate list.
     let SerializedSearchIndex { index, desc } = search_index;
