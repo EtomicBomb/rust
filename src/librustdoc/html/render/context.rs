@@ -15,7 +15,7 @@ use rustc_span::{sym, FileName, Symbol};
 
 use super::print_item::{full_path, item_path, print_item};
 use super::search_index::build_index;
-use super::write_shared::{PathToCrateParts, write_parts, write_static_files, write_merged};
+use super::write_shared::{write_parts, write_static_files, write_merged};
 use super::{
     collect_spans_and_sources, scrape_examples_help,
     sidebar::print_sidebar,
@@ -24,7 +24,7 @@ use super::{
 };
 use crate::clean::utils::has_doc_flag;
 use crate::clean::{self, types::ExternalLocation, ExternalCrate};
-use crate::config::{ModuleSorting, RenderOptions};
+use crate::config::{ModuleSorting, RenderOptions, PathToParts};
 use crate::docfs::{DocFS, PathError};
 use crate::error::Error;
 use crate::formats::cache::Cache;
@@ -587,11 +587,11 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             let lock_file = cx.dst.join(".lock");
             let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
 
-            let invocation = PathToCrateParts::new(&cx, ExternalCrate::LOCAL);
+            let invocation = PathToParts::local(&cx, ExternalCrate::LOCAL);
             write_parts(&mut cx, &krate, &invocation, index)?;
 
-            if !options.no_merge_parts {
-                let mut invocations = PathToCrateParts::all_documented_crates(&cx);
+            if options.merge_parts {
+                let mut invocations = PathToParts::all_documented_crates(&cx, &md_opts);
                 invocations.push(invocation);
                 write_merged(&mut cx, &md_opts, &invocations)?;
                 write_static_files(&mut cx, &md_opts)?;

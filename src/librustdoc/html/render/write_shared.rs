@@ -37,8 +37,8 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned, Serializer};
 
 use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
 use crate::html::render::sorted_json::SortedJson;
-use crate::clean::{ExternalCrate, ExternalLocation, Crate, Item, ItemId, ItemKind};
-use crate::config::{EmitType, RenderOptions};
+use crate::clean::{Crate, Item, ItemId, ItemKind};
+use crate::config::{EmitType, RenderOptions, PathToParts};
 use crate::docfs::PathError;
 use crate::error::Error;
 use crate::formats::cache::Cache;
@@ -98,34 +98,6 @@ pub(crate) fn write_static_files(
     Ok(())
 }
 
-/// Identifies a crate. Absolute path, including path to the doc root, `.parts` and the crate name.
-///
-/// For example, `/home/user/project/target/doc/.parts/smallvec/`.
-#[derive(Clone, Debug)]
-pub(crate) struct PathToCrateParts(PathBuf);
-
-impl PathToCrateParts {
-    pub(crate) fn new(cx: &Context<'_>, krate: ExternalCrate) -> PathToCrateParts {
-        let name = krate.name(cx.tcx());
-        PathToCrateParts(PathBuf::from_iter([&cx.dst, Path::new(".parts"), Path::new(name.as_str())]))
-    }
-
-    /// All crates that have been externed and downloaded to a local doc directory.
-    pub(crate) fn all_documented_crates(cx: &Context<'_>) -> Vec<PathToCrateParts> {
-        cx.cache().extern_locations.iter()
-            .filter_map(|(&crate_num, external_location)| {
-                let external_crate = ExternalCrate { crate_num };
-                match external_location {
-                    ExternalLocation::Local =>  Some(PathToCrateParts::new(&cx, external_crate)),
-                    // When cargo doc recursively documents dependencies, they're documented locally
-                    ExternalLocation::Remote(_path) => { None }
-                    ExternalLocation::Unknown => { None }
-                }
-            })
-            .collect()
-    }
-}
-
 /// Gets the paths to all locally documented crates.
 
 /// Paths (relative to `doc/`) and their pre-merge contents
@@ -158,8 +130,8 @@ impl<T, U> PartsAndLocations<Part<T, U>> {
 }
 
 impl<T: NamedCrossCrateInformation, U: Serialize> PartsAndLocations<Part<T, U>> {
-    fn write(self, cx: &mut Context<'_>, parts_path: &PathToCrateParts) -> Result<(), Error> {
-        let path = parts_path.0.join(T::NAME);
+    fn write(self, cx: &mut Context<'_>, parts_path: &PathToParts) -> Result<(), Error> {
+        let path = parts_path.join_with_cci_type(T::NAME);
         write_create_parents(cx, path, serde_json::to_string(&self).unwrap())?;
         Ok(())
     }
@@ -179,10 +151,10 @@ struct Part<T, U> {
 impl<T: NamedCrossCrateInformation + DeserializeOwned, U: DeserializeOwned> Part<T, U> {
     /// Yields a fully qualified path and the collected parts that should be rendered and
     /// written there.
-    fn read_merged_parts(cx: &Context<'_>, parts_paths: &[PathToCrateParts]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
+    fn read_merged_parts(cx: &Context<'_>, parts_paths: &[PathToParts]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
         let mut ret: FxHashMap<PathBuf, Vec<U>> = Default::default();
         for parts_path in parts_paths {
-            let path = parts_path.0.join(T::NAME);
+            let path = parts_path.join_with_cci_type(T::NAME);
             let parts = try_err!(fs::read(&path), &path);
             let parts: PartsAndLocations::<Self> = try_err!(serde_json::from_slice(&parts), &path);
             for (path, part) in parts.parts {
@@ -270,7 +242,7 @@ fn only_element<T>(mut items: Vec<T>) -> Option<T> {
 pub(crate) fn write_merged(
     cx: &mut Context<'_>,
     options: &RenderOptions,
-    parts_paths: &[PathToCrateParts],
+    parts_paths: &[PathToParts],
 ) -> Result<(), Error> {
 
     let emit_invocation_specific = options.emit.is_empty() || options.emit.contains(&EmitType::InvocationSpecific);
@@ -289,11 +261,11 @@ pub(crate) fn write_merged(
     if emit_invocation_specific {
         for (path, part) in SearchIndexPart::read_merged_parts(cx, parts_paths)? {
             let all_indexes = SortedJson::array(part.into_iter());
-            write_create_parents(cx, path, format!(r"#
+            write_create_parents(cx, path, format!(r"
 var searchIndex = new Map({all_indexes});
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);
-#"))?;
+"))?;
         }
     }
 
@@ -609,7 +581,7 @@ impl Hierarchy {
 pub(crate) fn write_parts(
     cx: &mut Context<'_>,
     krate: &Crate,
-    parts_path: &PathToCrateParts,
+    parts_path: &PathToParts,
     search_index: SerializedSearchIndex,
 ) -> Result<(), Error> {
     // Write out the shared files. Note that these are shared among all rustdoc

@@ -603,6 +603,26 @@ fn opts() -> Vec<RustcOptGroup> {
                 "path to function call information (for displaying examples in the documentation)",
             )
         }),
+        unstable("merge-parts", |o| {
+            o.optopt(
+                "",
+                "merge-parts",
+                "Generates the `doc/.parts` directory, but not the shared artifacts. \
+                This delays the generation of much of the documentation until  \
+                `rustdoc link` is run. `false` if not specified, `true` \
+                if provided with no parameter",
+                "[true|false]",
+            )
+        }),
+        unstable("extern-parts-path", |o| {
+            o.optmulti(
+                "",
+                "extern-parts-path",
+                "The path to the docs for an externally located crate. \
+                Must be able to find the parts at documentation-time \
+                in `<path>/.parts/<crate name>`",
+                "NAME=PATH")
+        }),
         // deprecated / removed options
         unstable("disable-minification", |o| o.optflagmulti("", "disable-minification", "removed")),
         stable("plugin-path", |o| {
@@ -652,14 +672,6 @@ fn opts() -> Vec<RustcOptGroup> {
         unstable("html-no-source", |o| {
             o.optflag("", "html-no-source", "Disable HTML source code pages generation")
         }),
-        unstable("no-merge-parts", |o| {
-            o.optflag(
-                "",
-                "no-merge-parts",
-                "Generates the `doc/.parts` directory, but not the shared artifacts. \
-                This delays the generation of much of the documentation until  \
-                `rustdoc link` is run.")
-        })
     ]
 }
 

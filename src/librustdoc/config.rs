@@ -24,6 +24,8 @@ use rustc_target::spec::TargetTriple;
 
 use crate::core::new_dcx;
 use crate::externalfiles::ExternalHtml;
+use crate::clean::{types::ExternalLocation, ExternalCrate};
+use crate::html::render::Context;
 use crate::html;
 use crate::html::markdown::IdMap;
 use crate::html::render::StylePath;
@@ -292,9 +294,12 @@ pub(crate) struct RenderOptions {
     /// If `true`, HTML source code pages won't be generated.
     pub(crate) html_no_source: bool,
     /// Generates the `doc/.parts` directory, but not the shared artifacts.
-    /// This delays the generation of much of the documentation until
-    /// `rustdoc link` is run.
-    pub(crate) no_merge_parts: bool,
+    /// This delays the generation of much of the documentation
+    /// until rustdoc is run with `--merge-parts`.
+    pub(crate) merge_parts: bool,
+    /// The location of the doc directory for externally located crates.
+    /// Absolute path ending in doc/.
+    pub(crate) extern_parts_paths: FxHashMap<String, PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -494,6 +499,11 @@ impl Options {
 
         let externs = parse_externs(early_dcx, matches, &unstable_opts);
         let extern_html_root_urls = match parse_extern_html_roots(matches) {
+            Ok(ex) => ex,
+            Err(err) => dcx.fatal(err),
+        };
+
+        let extern_parts_paths = match parse_extern_parts_paths(matches) {
             Ok(ex) => ex,
             Err(err) => dcx.fatal(err),
         };
@@ -738,7 +748,9 @@ impl Options {
         let extern_html_root_takes_precedence =
             matches.opt_present("extern-html-root-takes-precedence");
         let html_no_source = matches.opt_present("html-no-source");
-        let no_merge_parts = matches.opt_present("no-merge-parts");
+        let Ok(merge_parts) = matches.opt_get_default("merge-parts", true) else {
+            dcx.fatal(format!("merge-parts only accepts true and false"))
+        };
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -824,7 +836,8 @@ impl Options {
             call_locations,
             no_emit_shared: false,
             html_no_source,
-            no_merge_parts,
+            merge_parts,
+            extern_parts_paths,
         };
         Some((options, render_options))
     }
@@ -899,6 +912,67 @@ fn parse_extern_html_roots(
         let (name, url) =
             arg.split_once('=').ok_or("--extern-html-root-url must be of the form name=url")?;
         externs.insert(name.to_string(), url.to_string());
+    }
+    Ok(externs)
+}
+
+/// Identifies a crate. Absolute path, including path to the doc root, `.parts` and the crate name.
+///
+/// For example, `/home/user/project/target/doc/.parts/smallvec/`.
+#[derive(Clone, Debug)]
+pub(crate) struct PathToParts(PathBuf);
+
+impl PathToParts {
+    fn from_doc_root(cx: &Context<'_>, doc_root: &Path, krate: ExternalCrate) -> Self {
+        let name = krate.name(cx.tcx());
+        PathToParts(PathBuf::from_iter([doc_root, Path::new(".parts"), Path::new(name.as_str())]))
+    }
+
+    /// Gets the path to .parts, assuming that the crate is documented in the
+    /// local doc/ directory.
+    pub(crate) fn local(cx: &Context<'_>, krate: ExternalCrate) -> Self {
+        Self::from_doc_root(cx, &cx.dst, krate)
+    }
+
+    /// Gets the final path at which to place the cci part
+    pub(crate) fn join_with_cci_type(&self, cci_type: &str) -> PathBuf {
+        self.0.join(cci_type)
+    }
+
+    /// All crates that have been documented in the local doc directory,
+    /// or crates that have been externed and `--extern-parts-path`ed
+    pub(crate) fn all_documented_crates(cx: &Context<'_>, options: &RenderOptions) -> Vec<Self> {
+        // only includes crates that are actually used in the source `think extern crate c; use
+        // c::Struct`
+        cx.shared.cache.extern_locations.iter()
+            .filter_map(|(&crate_num, external_location)| {
+                let external_crate = ExternalCrate { crate_num };
+                let name = external_crate.name(cx.tcx());
+                match external_location {
+                    ExternalLocation::Local => Some(Self::local(&cx, external_crate)),
+                    ExternalLocation::Remote(_path) => {
+                        options.extern_parts_paths.get(name.as_str()).map(|doc_root| {
+                            Self::from_doc_root(cx, doc_root, external_crate)
+                        })
+                    }
+                    ExternalLocation::Unknown => None,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Extracts `--extern-parts-path` arguments from `matches` and returns a map of crate names to
+/// the given locations. If an `--extern-html-root-url` argument was ill-formed, returns an error
+/// describing the issue.
+fn parse_extern_parts_paths(
+    matches: &getopts::Matches,
+) -> Result<FxHashMap<String, PathBuf>, &'static str> {
+    let mut externs = FxHashMap::default();
+    for arg in &matches.opt_strs("extern-parts-path") {
+        let (name, path) =
+            arg.split_once('=').ok_or("--extern-parts-path must be of the form name=path")?;
+        externs.insert(name.to_string(), PathBuf::from(path));
     }
     Ok(externs)
 }
