@@ -794,7 +794,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
         if let ty::PredicateKind::Clause(ty::ClauseKind::Trait(trait_pred)) =
             obligation.predicate.kind().skip_binder()
-            && Some(trait_pred.def_id()) == self.tcx.lang_items().sized_trait()
+            && self.tcx.is_lang_item(trait_pred.def_id(), LangItem::Sized)
         {
             // Don't suggest calling to turn an unsized type into a sized type
             return false;
@@ -1106,7 +1106,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                             .iter()
                             .find_map(|pred| {
                                 if let ty::ClauseKind::Projection(proj) = pred.kind().skip_binder()
-                        && Some(proj.projection_term.def_id) == self.tcx.lang_items().fn_once_output()
+                        && self.tcx.is_lang_item(proj.projection_term.def_id,LangItem::FnOnceOutput)
                         // args tuple will always be args[1]
                         && let ty::Tuple(args) = proj.projection_term.args.type_at(1).kind()
                                 {
@@ -1123,7 +1123,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     ty::Dynamic(data, _, ty::Dyn) => {
                         data.iter().find_map(|pred| {
                             if let ty::ExistentialPredicate::Projection(proj) = pred.skip_binder()
-                        && Some(proj.def_id) == self.tcx.lang_items().fn_once_output()
+                        && self.tcx.is_lang_item(proj.def_id, LangItem::FnOnceOutput)
                         // for existential projection, args are shifted over by 1
                         && let ty::Tuple(args) = proj.args.type_at(0).kind()
                             {
@@ -1150,7 +1150,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                         };
                         param_env.caller_bounds().iter().find_map(|pred| {
                             if let ty::ClauseKind::Projection(proj) = pred.kind().skip_binder()
-                        && Some(proj.projection_term.def_id) == self.tcx.lang_items().fn_once_output()
+                        && self.tcx.is_lang_item(proj.projection_term.def_id, LangItem::FnOnceOutput)
                         && proj.projection_term.self_ty() == found
                         // args tuple will always be args[1]
                         && let ty::Tuple(args) = proj.projection_term.args.type_at(1).kind()
@@ -1822,7 +1822,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 && box_path
                     .res
                     .opt_def_id()
-                    .is_some_and(|def_id| Some(def_id) == self.tcx.lang_items().owned_box())
+                    .is_some_and(|def_id| self.tcx.is_lang_item(def_id, LangItem::OwnedBox))
             {
                 // Don't box `Box::new`
                 vec![]
@@ -2737,7 +2737,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             | ObligationCauseCode::ObjectTypeBound(..) => {}
             ObligationCauseCode::RustCall => {
                 if let Some(pred) = predicate.as_trait_clause()
-                    && Some(pred.def_id()) == tcx.lang_items().sized_trait()
+                    && tcx.is_lang_item(pred.def_id(), LangItem::Sized)
                 {
                     err.note("argument required to be sized due to `extern \"rust-call\"` ABI");
                 }
@@ -2776,97 +2776,115 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 let mut this = "this bound";
                 let mut note = None;
                 let mut help = None;
-                if let ty::PredicateKind::Clause(clause) = predicate.kind().skip_binder()
-                    && let ty::ClauseKind::Trait(trait_pred) = clause
-                {
-                    let def_id = trait_pred.def_id();
-                    let visible_item = if let Some(local) = def_id.as_local() {
-                        // Check for local traits being reachable.
-                        let vis = &tcx.resolutions(()).effective_visibilities;
-                        // Account for non-`pub` traits in the root of the local crate.
-                        let is_locally_reachable = tcx.parent(def_id).is_crate_root();
-                        vis.is_reachable(local) || is_locally_reachable
-                    } else {
-                        // Check for foreign traits being reachable.
-                        tcx.visible_parent_map(()).get(&def_id).is_some()
-                    };
-                    if Some(def_id) == tcx.lang_items().sized_trait() {
-                        // Check if this is an implicit bound, even in foreign crates.
-                        if tcx
-                            .generics_of(item_def_id)
-                            .own_params
-                            .iter()
-                            .any(|param| tcx.def_span(param.def_id) == span)
-                        {
-                            a = "an implicit `Sized`";
-                            this = "the implicit `Sized` requirement on this type parameter";
-                        }
-                        if let Some(hir::Node::TraitItem(hir::TraitItem {
-                            generics,
-                            kind: hir::TraitItemKind::Type(bounds, None),
-                            ..
-                        })) = tcx.hir().get_if_local(item_def_id)
-                        // Do not suggest relaxing if there is an explicit `Sized` obligation.
-                        && !bounds.iter()
-                            .filter_map(|bound| bound.trait_ref())
-                            .any(|tr| tr.trait_def_id() == tcx.lang_items().sized_trait())
-                        {
-                            let (span, separator) = if let [.., last] = bounds {
-                                (last.span().shrink_to_hi(), " +")
+                if let ty::PredicateKind::Clause(clause) = predicate.kind().skip_binder() {
+                    match clause {
+                        ty::ClauseKind::Trait(trait_pred) => {
+                            let def_id = trait_pred.def_id();
+                            let visible_item = if let Some(local) = def_id.as_local() {
+                                // Check for local traits being reachable.
+                                let vis = &tcx.resolutions(()).effective_visibilities;
+                                // Account for non-`pub` traits in the root of the local crate.
+                                let is_locally_reachable = tcx.parent(def_id).is_crate_root();
+                                vis.is_reachable(local) || is_locally_reachable
                             } else {
-                                (generics.span.shrink_to_hi(), ":")
+                                // Check for foreign traits being reachable.
+                                tcx.visible_parent_map(()).get(&def_id).is_some()
                             };
-                            err.span_suggestion_verbose(
-                                span,
-                                "consider relaxing the implicit `Sized` restriction",
-                                format!("{separator} ?Sized"),
-                                Applicability::MachineApplicable,
-                            );
+                            if tcx.is_lang_item(def_id, LangItem::Sized) {
+                                // Check if this is an implicit bound, even in foreign crates.
+                                if tcx
+                                    .generics_of(item_def_id)
+                                    .own_params
+                                    .iter()
+                                    .any(|param| tcx.def_span(param.def_id) == span)
+                                {
+                                    a = "an implicit `Sized`";
+                                    this =
+                                        "the implicit `Sized` requirement on this type parameter";
+                                }
+                                if let Some(hir::Node::TraitItem(hir::TraitItem {
+                                    generics,
+                                    kind: hir::TraitItemKind::Type(bounds, None),
+                                    ..
+                                })) = tcx.hir().get_if_local(item_def_id)
+                                    // Do not suggest relaxing if there is an explicit `Sized` obligation.
+                                    && !bounds.iter()
+                                        .filter_map(|bound| bound.trait_ref())
+                                        .any(|tr| tr.trait_def_id() == tcx.lang_items().sized_trait())
+                                {
+                                    let (span, separator) = if let [.., last] = bounds {
+                                        (last.span().shrink_to_hi(), " +")
+                                    } else {
+                                        (generics.span.shrink_to_hi(), ":")
+                                    };
+                                    err.span_suggestion_verbose(
+                                        span,
+                                        "consider relaxing the implicit `Sized` restriction",
+                                        format!("{separator} ?Sized"),
+                                        Applicability::MachineApplicable,
+                                    );
+                                }
+                            }
+                            if let DefKind::Trait = tcx.def_kind(item_def_id)
+                                && !visible_item
+                            {
+                                note = Some(format!(
+                                    "`{short_item_name}` is a \"sealed trait\", because to implement it \
+                                    you also need to implement `{}`, which is not accessible; this is \
+                                    usually done to force you to use one of the provided types that \
+                                    already implement it",
+                                    with_no_trimmed_paths!(tcx.def_path_str(def_id)),
+                                ));
+                                let impls_of = tcx.trait_impls_of(def_id);
+                                let impls = impls_of
+                                    .non_blanket_impls()
+                                    .values()
+                                    .flatten()
+                                    .chain(impls_of.blanket_impls().iter())
+                                    .collect::<Vec<_>>();
+                                if !impls.is_empty() {
+                                    let len = impls.len();
+                                    let mut types = impls
+                                        .iter()
+                                        .map(|t| {
+                                            with_no_trimmed_paths!(format!(
+                                                "  {}",
+                                                tcx.type_of(*t).instantiate_identity(),
+                                            ))
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let post = if types.len() > 9 {
+                                        types.truncate(8);
+                                        format!("\nand {} others", len - 8)
+                                    } else {
+                                        String::new()
+                                    };
+                                    help = Some(format!(
+                                        "the following type{} implement{} the trait:\n{}{post}",
+                                        pluralize!(len),
+                                        if len == 1 { "s" } else { "" },
+                                        types.join("\n"),
+                                    ));
+                                }
+                            }
                         }
-                    }
-                    if let DefKind::Trait = tcx.def_kind(item_def_id)
-                        && !visible_item
-                    {
-                        note = Some(format!(
-                            "`{short_item_name}` is a \"sealed trait\", because to implement it \
-                             you also need to implement `{}`, which is not accessible; this is \
-                             usually done to force you to use one of the provided types that \
-                             already implement it",
-                            with_no_trimmed_paths!(tcx.def_path_str(def_id)),
-                        ));
-                        let impls_of = tcx.trait_impls_of(def_id);
-                        let impls = impls_of
-                            .non_blanket_impls()
-                            .values()
-                            .flatten()
-                            .chain(impls_of.blanket_impls().iter())
-                            .collect::<Vec<_>>();
-                        if !impls.is_empty() {
-                            let len = impls.len();
-                            let mut types = impls
-                                .iter()
-                                .map(|t| {
-                                    with_no_trimmed_paths!(format!(
-                                        "  {}",
-                                        tcx.type_of(*t).instantiate_identity(),
-                                    ))
-                                })
-                                .collect::<Vec<_>>();
-                            let post = if types.len() > 9 {
-                                types.truncate(8);
-                                format!("\nand {} others", len - 8)
+                        ty::ClauseKind::ConstArgHasType(..) => {
+                            let descr =
+                                format!("required by a const generic parameter in `{item_name}`");
+                            if span.is_visible(sm) {
+                                let msg = format!(
+                                    "required by this const generic parameter in `{short_item_name}`"
+                                );
+                                multispan.push_span_label(span, msg);
+                                err.span_note(multispan, descr);
                             } else {
-                                String::new()
-                            };
-                            help = Some(format!(
-                                "the following type{} implement{} the trait:\n{}{post}",
-                                pluralize!(len),
-                                if len == 1 { "s" } else { "" },
-                                types.join("\n"),
-                            ));
+                                err.span_note(tcx.def_span(item_def_id), descr);
+                            }
+                            return;
                         }
+                        _ => (),
                     }
-                };
+                }
                 let descr = format!("required by {a} bound in `{item_name}`");
                 if span.is_visible(sm) {
                     let msg = format!("required by {this} in `{short_item_name}`");
@@ -4705,14 +4723,11 @@ fn hint_missing_borrow<'tcx>(
     }
 
     if !to_borrow.is_empty() {
-        err.subdiagnostic(infcx.dcx(), errors::AdjustSignatureBorrow::Borrow { to_borrow });
+        err.subdiagnostic(errors::AdjustSignatureBorrow::Borrow { to_borrow });
     }
 
     if !remove_borrow.is_empty() {
-        err.subdiagnostic(
-            infcx.dcx(),
-            errors::AdjustSignatureBorrow::RemoveBorrow { remove_borrow },
-        );
+        err.subdiagnostic(errors::AdjustSignatureBorrow::RemoveBorrow { remove_borrow });
     }
 }
 
