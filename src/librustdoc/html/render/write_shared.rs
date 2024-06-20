@@ -108,11 +108,7 @@ impl<P> Default for PartsAndLocations<P> {
 }
 
 impl<T, U> PartsAndLocations<Part<T, U>> {
-    fn push(
-        &mut self,
-        path: PathBuf,
-        item: U,
-    ) {
+    fn push(&mut self, path: PathBuf, item: U) {
         self.parts.push((path, Part { _artifact: PhantomData, item }));
     }
 
@@ -232,7 +228,7 @@ fn only_element<T>(mut items: Vec<T>) -> Option<T> {
     items.is_empty().then_some(ret)
 }
 
-/// Writes the cross crate information to the filesystem
+/// Renders and writes the cross crate information to the out dir
 pub(crate) fn write_merged(
     cx: &mut Context<'_>,
     options: &RenderOptions,
@@ -330,7 +326,6 @@ if (window.{register}) {{
         let part = SortedJson::object(part.into_iter());
         write_create_parents(cx, path, implementors_iife("type_impls", "register_type_impls", "pending_type_impls", part))?;
     }
-
 
     for (path, part) in TraitAliasPart::read_merged_parts(cx, parts_paths)? {
         let part = SortedJson::object(part.into_iter());
