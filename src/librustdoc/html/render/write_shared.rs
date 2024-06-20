@@ -119,10 +119,12 @@ impl<T, U> PartsAndLocations<Part<T, U>> {
     }
 }
 
-impl<T: NamedCrossCrateInformation, U: Serialize> PartsAndLocations<Part<T, U>> {
+impl<T, U: Serialize> PartsAndLocations<Part<T, U>>
+where Part<T, U>: NamedCrossCrateInformation,
+{
     fn write(self, cx: &mut Context<'_>, parts_path: &PathToParts) -> Result<(), Error> {
         let name = ExternalCrate::LOCAL.name(cx.tcx());
-        let path = parts_path.cci_path::<T>(name.as_str());
+        let path = parts_path.cci_path::<Part<T, U>>(name.as_str());
         write_create_parents(cx, path, serde_json::to_string(&self).unwrap())?;
         Ok(())
     }
@@ -139,7 +141,9 @@ struct Part<T, U> {
     item: U,
 }
 
-impl<T: NamedCrossCrateInformation + DeserializeOwned, U: DeserializeOwned> Part<T, U> {
+impl<T: DeserializeOwned, U: DeserializeOwned> Part<T, U>
+where Self: NamedCrossCrateInformation,
+{
     /// Yields a fully qualified path and the collected parts that should be rendered and
     /// written there.
     fn read_merged_parts(cx: &Context<'_>, read_rendered_cci: bool, parts_paths: &[(&str, &PathToParts)]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
@@ -148,7 +152,7 @@ impl<T: NamedCrossCrateInformation + DeserializeOwned, U: DeserializeOwned> Part
             eprintln!("todo: read_rendered_cci");
         }
         for (crate_name, parts_path) in parts_paths.iter() {
-            let path = parts_path.cci_path::<T>(crate_name);
+            let path = parts_path.cci_path::<Self>(crate_name);
             let parts = try_err!(fs::read(&path), &path);
             let parts: PartsAndLocations::<Self> = try_err!(serde_json::from_slice(&parts), &path);
             for (path, part) in parts.parts {
@@ -163,28 +167,32 @@ impl<T: NamedCrossCrateInformation + DeserializeOwned, U: DeserializeOwned> Part
 pub(crate) trait NamedCrossCrateInformation {
     /// Identifies the kind of cross crate information.
     ///
-    /// The filename in `doc/.parts/`
+    /// The cci type name in `doc.parts/<cci type>`
     const NAME: &'static str;
+
+//     fn read_rendered() -> (PathBuf, Self) {
+//
+//     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct Sources;
 type SourcesPart = Part<Sources, SortedJson>;
-impl NamedCrossCrateInformation for Sources {
+impl NamedCrossCrateInformation for SourcesPart {
     const NAME: &'static str = "src-files-js";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct SearchIndex;
 type SearchIndexPart = Part<SearchIndex, SortedJson>;
-impl NamedCrossCrateInformation for SearchIndex {
+impl NamedCrossCrateInformation for SearchIndexPart {
     const NAME: &'static str = "search-index-js";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct SearchDesc;
 type SearchDescPart = Part<SearchIndex, String>;
-impl NamedCrossCrateInformation for SearchDesc {
+impl NamedCrossCrateInformation for SearchDescPart {
     const NAME: &'static str = "search-desc";
 }
 impl SearchDesc {
@@ -194,28 +202,28 @@ impl SearchDesc {
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct AllCrates;
 type AllCratesPart = Part<AllCrates, SortedJson>;
-impl NamedCrossCrateInformation for AllCrates {
+impl NamedCrossCrateInformation for AllCratesPart {
     const NAME: &'static str = "crates-js";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct CratesIndex;
 type CratesIndexPart = Part<CratesIndex, String>;
-impl NamedCrossCrateInformation for CratesIndex {
+impl NamedCrossCrateInformation for CratesIndexPart {
     const NAME: &'static str = "index-html";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TypeAlias;
 type TypeAliasPart = Part<TypeAlias, (SortedJson, SortedJson)>;
-impl NamedCrossCrateInformation for TypeAlias {
+impl NamedCrossCrateInformation for TypeAliasPart {
     const NAME: &'static str = "type-impl";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TraitAlias;
 type TraitAliasPart = Part<TraitAlias, (SortedJson, SortedJson)>;
-impl NamedCrossCrateInformation for TraitAlias {
+impl NamedCrossCrateInformation for TraitAliasPart {
     const NAME: &'static str = "trait-impl";
 }
 
