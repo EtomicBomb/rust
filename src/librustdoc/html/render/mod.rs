@@ -84,6 +84,8 @@ use crate::scrape_examples::{CallData, CallLocation};
 use crate::try_none;
 use crate::DOC_RUST_LANG_ORG_CHANNEL;
 
+pub(crate) use write_shared::NamedCrossCrateInformation;
+
 pub(crate) fn ensure_trailing_slash(v: &str) -> impl fmt::Display + '_ {
     crate::html::format::display_fn(move |f| {
         if !v.ends_with('/') && !v.is_empty() { write!(f, "{v}/") } else { f.write_str(v) }

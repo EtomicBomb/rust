@@ -24,7 +24,7 @@ use super::{
 };
 use crate::clean::utils::has_doc_flag;
 use crate::clean::{self, types::ExternalLocation, ExternalCrate};
-use crate::config::{ModuleSorting, RenderOptions, PathToParts};
+use crate::config::{ModuleSorting, RenderOptions};
 use crate::docfs::{DocFS, PathError};
 use crate::error::Error;
 use crate::formats::cache::Cache;
@@ -587,15 +587,15 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             let lock_file = cx.dst.join(".lock");
             let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
 
-            let invocation = PathToParts::local(&cx, ExternalCrate::LOCAL);
-            write_parts(&mut cx, &krate, &invocation, index)?;
+            if let Some(parts_out_dir) = &options.parts_out_dir {
+                write_parts(&mut cx, &krate, &parts_out_dir, index)?;
+            }
 
-            if options.merge_parts {
-                let mut invocations = PathToParts::all_documented_crates(&cx, &md_opts);
-                invocations.push(invocation);
-                write_merged(&mut cx, &md_opts, &invocations)?;
+            if options.write_rendered_cci {
+                write_merged(&mut cx, &md_opts)?;
                 write_static_files(&mut cx, &md_opts)?;
             }
+
             Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(false);
         }
 

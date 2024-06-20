@@ -603,26 +603,32 @@ fn opts() -> Vec<RustcOptGroup> {
                 "path to function call information (for displaying examples in the documentation)",
             )
         }),
-        unstable("merge-parts", |o| {
+        unstable("write-rendered-cci", |o| {
             o.optopt(
                 "",
-                "merge-parts",
-                "Generates the `doc/.parts` directory, but not the shared artifacts. \
-                This delays the generation of much of the documentation until  \
-                `rustdoc link` is run. `false` if not specified, `true` \
-                if provided with no parameter",
+                "write-rendered-cci",
+                "Writes the cross-crate information to the doc root. \
+                Defaults to true.",
                 "[true|false]",
             )
         }),
-        unstable("extern-parts-path", |o| {
+        unstable("read-rendered-cci", |o| {
+            o.optopt(
+                "",
+                "read-rendered-cci",
+                "Reads partial cross-crate information from the doc. \
+                Defaults to true.",
+                "[true|false]",
+            )
+        }),
+        unstable("fetch-parts", |o| {
             o.optmulti(
                 "",
-                "extern-parts-path",
-                "The path to the docs for an externally located crate. \
-                Must be able to find the parts at documentation-time \
-                in `<path>/.parts/<crate name>`",
+                "fetch-parts",
+                "appends cross-crate information fetched from PATH to the output",
                 "NAME=PATH")
         }),
+        unstable("parts-out-dir", |o| o.optopt("", "parts-out-dir", "which directory to place the cross-crate information doc parts", "PATH")),
         // deprecated / removed options
         unstable("disable-minification", |o| o.optflagmulti("", "disable-minification", "removed")),
         stable("plugin-path", |o| {
