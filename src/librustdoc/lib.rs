@@ -616,7 +616,7 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optopt(
                 "",
                 "read-rendered-cci",
-                "Reads partial cross-crate information from the doc. \
+                "Reads partial cross-crate information from the doc root. \
                 Defaults to true.",
                 "[true|false]",
             )

@@ -35,6 +35,7 @@ mod span_map;
 mod type_layout;
 mod write_shared;
 mod sorted_json;
+mod offset_template;
 
 pub(crate) use self::context::*;
 pub(crate) use self::span_map::{collect_spans_and_sources, LinkFromSrc};

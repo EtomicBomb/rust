@@ -31,6 +31,7 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned, Serializer};
 
 use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
 use crate::html::render::sorted_json::SortedJson;
+use crate::html::render::offset_template::{self, OffsetTemplate};
 use crate::clean::{Crate, Item, ItemId, ItemKind, types::ExternalCrate};
 use crate::config::{EmitType, RenderOptions, PathToParts};
 use crate::docfs::PathError;
@@ -149,8 +150,9 @@ where Self: NamedPart,
     fn read_merged_parts(cx: &Context<'_>, read_rendered_cci: bool, parts_paths: &[(&str, &PathToParts)]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
         let mut ret: FxHashMap<PathBuf, Vec<U>> = Default::default();
         if read_rendered_cci {
-            let (path, part) = Self::read_rendered(&cx.dst);
-            ret.entry(path).or_default().push(part.item);
+            eprintln!("todo");
+//             let (path, part) = Self::read_rendered(&cx.dst);
+//             ret.entry(path).or_default().push(part.item);
         }
         for (crate_name, parts_path) in parts_paths.iter() {
             let path = parts_path.cci_path::<Self>(crate_name);
@@ -171,7 +173,8 @@ pub(crate) trait NamedPart: Sized {
     /// The cci type name in `doc.parts/<cci type>`
     const NAME: &'static str;
 
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self);
+    type FileFormat;
+    fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat>;
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -179,8 +182,10 @@ struct Sources;
 type SourcesPart = Part<Sources, SortedJson>;
 impl NamedPart for SourcesPart {
     const NAME: &'static str = "src-files-js";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
+
+    type FileFormat = offset_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        OffsetTemplate::before_after("var srcIndex = new Map([",  "]); createSrcSidebar()")
     }
 }
 
@@ -189,22 +194,14 @@ struct SearchIndex;
 type SearchIndexPart = Part<SearchIndex, SortedJson>;
 impl NamedPart for SearchIndexPart {
     const NAME: &'static str = "search-index-js";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
-    }
-}
 
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
-struct SearchDesc;
-type SearchDescPart = Part<SearchIndex, String>;
-impl NamedPart for SearchDescPart {
-    const NAME: &'static str = "search-desc";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
+    type FileFormat = offset_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        OffsetTemplate::before_after("var searchIndex = new Map([", "]);
+if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
+else if (window.initSearch) window.initSearch(searchIndex);
+")
     }
-}
-impl SearchDesc {
-    const PATH: &'static str = "search.desc";
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -212,8 +209,9 @@ struct AllCrates;
 type AllCratesPart = Part<AllCrates, SortedJson>;
 impl NamedPart for AllCratesPart {
     const NAME: &'static str = "crates-js";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
+    type FileFormat = offset_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        OffsetTemplate::before_after("window.ALL_CRATES = [", "];")
     }
 }
 
@@ -222,18 +220,54 @@ struct CratesIndex;
 type CratesIndexPart = Part<CratesIndex, String>;
 impl NamedPart for CratesIndexPart {
     const NAME: &'static str = "index-html";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
+
+    type FileFormat = offset_template::Html;
+    fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        let mut magic = String::from("\u{FFFC}");
+        let page = layout::Page {
+            title: "Index of crates",
+            css_class: "mod sys",
+            root_path: "./",
+            static_root_path: cx.shared.static_root_path.as_deref(),
+            description: "List of crates",
+            resource_suffix: &cx.shared.resource_suffix,
+            rust_logo: true,
+        };
+        let layout = &cx.shared.layout;
+        let style_files = &cx.shared.style_files;
+        // HACK(EtomicBomb): This is fine
+        loop {
+            let content = format!("<h1>List of all crates</h1><ul class=\"all-items\">{magic}</ul>");
+            let template = layout::render(layout, &page, "", content, &style_files);
+            match OffsetTemplate::magic(&template, &magic) {
+                Ok(template) => return template,
+                Err(_) => magic.push_str("\u{FFFC}"),
+            }
+        }
     }
 }
+
+//             parts.into_iter().format_with("", |k, f| {
+//                 f(&format_args!(
+//                     "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
+//                     trailing_slash = ensure_trailing_slash(&k),
+//                 ))
+//             })
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TypeAlias;
 type TypeAliasPart = Part<TypeAlias, (SortedJson, SortedJson)>;
 impl NamedPart for TypeAliasPart {
     const NAME: &'static str = "type-impl";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
+    type FileFormat = offset_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        OffsetTemplate::before_after(r"(function() {var type_impls = {", r"};
+    if (window.register_type_impls) {
+        window.register_type_impls(type_impls);
+    } else {
+        window.pending_type_impls = type_impls;
+    }
+})())")
     }
 }
 
@@ -242,22 +276,24 @@ struct TraitAlias;
 type TraitAliasPart = Part<TraitAlias, (SortedJson, SortedJson)>;
 impl NamedPart for TraitAliasPart {
     const NAME: &'static str = "trait-impl";
-    fn read_rendered(_doc_root: &Path) -> (PathBuf, Self) {
-        todo!()
+
+    type FileFormat = offset_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        OffsetTemplate::before_after(r"(function() {var implementors = {", r"};
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})())")
     }
 }
 
-fn write_create_parents(cx: &mut Context<'_>, path: PathBuf, content: String) -> Result<(), Error> {
+fn write_create_parents(cx: &Context<'_>, path: PathBuf, content: String) -> Result<(), Error> {
     let parent = path.parent().expect("trying to write to an empty path");
     try_err!(cx.shared.fs.create_dir_all(parent), parent);
     cx.shared.fs.write(path, content)?;
     Ok(())
-}
-
-/// None if more than or fewer than one element in `items`
-fn only_element<T>(mut items: Vec<T>) -> Option<T> {
-    let ret = items.pop()?;
-    items.is_empty().then_some(ret)
 }
 
 /// Renders and writes the cross crate information to the out dir
@@ -286,21 +322,11 @@ pub(crate) fn write_merged(
     if emit_invocation_specific {
         for (path, part) in SearchIndexPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
             let all_indexes = SortedJson::array(part.into_iter());
-            write_create_parents(cx, path, format!(r"
-var searchIndex = new Map({all_indexes});
+            write_create_parents(cx, path, format!(r"var searchIndex = new Map({all_indexes});
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);
 "))?;
         }
-    }
-
-    let search_desc = PathBuf::from_iter([&cx.dst, Path::new(SearchDesc::PATH)]);
-    if Path::new(&search_desc).exists() {
-        try_err!(fs::remove_dir_all(&search_desc), &search_desc);
-    }
-    for (path, part) in SearchDescPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-        let part = try_err!(only_element(part).ok_or("not one shard in part"), &path);
-        write_create_parents(cx, path, part)?;
     }
 
     if emit_invocation_specific {
@@ -601,12 +627,35 @@ impl Hierarchy {
     }
 }
 
+pub(crate) fn write_search_desc(cx: &Context<'_>, krate: &Crate, search_index: &SerializedSearchIndex) -> Result<(), Error> {
+    let crate_name = krate.name(cx.tcx()).to_string();
+    let encoded_crate_name = SortedJson::serialize(&crate_name);
+
+    let path = PathBuf::from_iter([&cx.dst, Path::new("search.desc"), Path::new(&crate_name)]);
+    if Path::new(&path).exists() {
+        try_err!(fs::remove_dir_all(&path), &path);
+    }
+
+    for (i, (_, part)) in search_index.desc.iter().enumerate() {
+        let filename = static_files::suffix_path(
+            &format!("{crate_name}-desc-{i}-.js"),
+            &cx.shared.resource_suffix,
+        );
+        let path = path.join(filename);
+        let part = SortedJson::serialize(&part);
+        let part = format!("searchState.loadedDescShard({encoded_crate_name}, {i}, {part})");
+        write_create_parents(cx, path, part)?;
+    }
+    Ok(())
+
+}
+
 /// Documents the shared artifacts from `krate` to the `doc/.parts` directory
 pub(crate) fn write_parts(
     cx: &mut Context<'_>,
     krate: &Crate,
     parts_out_dir: &PathToParts,
-    search_index: SerializedSearchIndex,
+    search_index: &SerializedSearchIndex,
 ) -> Result<(), Error> {
     // Write out the shared files. Note that these are shared among all rustdoc
     // docs placed in the output directory, so this needs to be a synchronized
@@ -633,23 +682,8 @@ pub(crate) fn write_parts(
     let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
     PartsAndLocations::<SourcesPart>::with(path, hierarchy.to_json_string()).write(cx, parts_out_dir)?;
 
-    // Update the search index and crate list.
-    let SerializedSearchIndex { index, desc } = search_index;
-
     let path = suffix_path("search-index.js", &cx.shared.resource_suffix);
-    PartsAndLocations::<SearchIndexPart>::with(path, SortedJson::serialize(&index)).write(cx, parts_out_dir)?;
-
-    let mut parts = PartsAndLocations::<SearchDescPart>::default();
-    for (i, (_, part)) in desc.into_iter().enumerate() {
-        let path = PathBuf::from(static_files::suffix_path(
-            &format!("{}/{crate_name}/{crate_name}-desc-{i}-.js", SearchDesc::PATH),
-            &cx.shared.resource_suffix,
-        ));
-        let part = SortedJson::serialize(&part);
-        let part = format!("searchState.loadedDescShard({encoded_crate_name}, {i}, {part})");
-        parts.push(path, part);
-    }
-    parts.write(cx, parts_out_dir)?;
+    PartsAndLocations::<SearchIndexPart>::with(path, SortedJson::serialize(&search_index.index)).write(cx, parts_out_dir)?;
 
     let cloned_shared = Rc::clone(&cx.shared);
     let cache = &cloned_shared.cache;

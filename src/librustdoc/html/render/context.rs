@@ -15,7 +15,7 @@ use rustc_span::{sym, FileName, Symbol};
 
 use super::print_item::{full_path, item_path, print_item};
 use super::search_index::build_index;
-use super::write_shared::{write_parts, write_static_files, write_merged};
+use super::write_shared::{write_parts, write_static_files, write_merged, write_search_desc};
 use super::{
     collect_spans_and_sources, scrape_examples_help,
     sidebar::print_sidebar,
@@ -588,12 +588,13 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
 
             if let Some(parts_out_dir) = &options.parts_out_dir {
-                write_parts(&mut cx, &krate, &parts_out_dir, index)?;
+                write_parts(&mut cx, &krate, &parts_out_dir, &index)?;
             }
 
             if options.write_rendered_cci {
-                write_merged(&mut cx, &md_opts)?;
+                write_search_desc(&cx, &krate, &index)?;
                 write_static_files(&mut cx, &md_opts)?;
+                write_merged(&mut cx, &md_opts)?;
             }
 
             Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(false);
