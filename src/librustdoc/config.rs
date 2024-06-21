@@ -25,7 +25,7 @@ use rustc_target::spec::TargetTriple;
 
 use crate::core::new_dcx;
 use crate::externalfiles::ExternalHtml;
-use crate::html::render::NamedCrossCrateInformation;
+use crate::html::render::NamedPart;
 use crate::html;
 use crate::html::markdown::IdMap;
 use crate::html::render::StylePath;
@@ -938,7 +938,7 @@ impl PathToParts {
     }
 
     /// Gets the final path at which to place the cci part
-    pub(crate) fn cci_path<T: NamedCrossCrateInformation>(&self, crate_name: &str) -> PathBuf {
+    pub(crate) fn cci_path<T: NamedPart>(&self, crate_name: &str) -> PathBuf {
         PathBuf::from_iter([&self.0, Path::new(crate_name), Path::new(T::NAME)])
     }
 }
