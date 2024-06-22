@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn html_from_empty() {
         let inserts = ["<p>hello</p>", "<p>kind</p>", "<p>world</p>"];
-        let mut template = OffsetTemplate::<Html>::blank("".to_string(), 0);
+        let mut template = OffsetTemplate::<Html>::before_after("", "");
         for insert in inserts {
             template.append(insert).unwrap();
         }
@@ -127,7 +127,7 @@ mod tests {
         let inserts = ["<p>hello</p>", "<p>kind</p>", "<p>world</p>"];
         let before = "<html><head></head><body>";
         let after = "</body>";
-        let mut template = OffsetTemplate::<Html>::blank(format!("{before}{after}"), before.len());
+        let mut template = OffsetTemplate::<Html>::before_after(before, after);
         for insert in inserts {
             template.append(insert).unwrap();
         }
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn js_from_empty() {
         let inserts = ["1", "2", "3"];
-        let mut template = OffsetTemplate::<Js>::blank("".to_string(), 0);
+        let mut template = OffsetTemplate::<Js>::before_after("", "");
         for insert in inserts {
             template.append(insert).unwrap();
         }
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn js_empty_array() {
-        let template = OffsetTemplate::<Js>::blank("[]".to_string(), 1);
+        let template = OffsetTemplate::<Js>::before_after("[", "]");
         let template = format!("{template}");
         let (template, _) = template.rsplit_once("\n").unwrap();
         assert_eq!(template, format!("[]"));
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn js_number_array() {
         let inserts = ["1", "2", "3"];
-        let mut template = OffsetTemplate::<Js>::blank("[]".to_string(), 1);
+        let mut template = OffsetTemplate::<Js>::before_after("[", "]");
         for insert in inserts {
             template.append(insert).unwrap();
         }

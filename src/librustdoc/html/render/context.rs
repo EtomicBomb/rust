@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver};
 
-use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::{DefIdMap, LOCAL_CRATE};
 use rustc_middle::ty::TyCtxt;
@@ -14,8 +13,7 @@ use rustc_span::edition::Edition;
 use rustc_span::{sym, FileName, Symbol};
 
 use super::print_item::{full_path, item_path, print_item};
-use super::search_index::build_index;
-use super::write_shared::{write_parts, write_static_files, write_merged, write_search_desc};
+use super::write_shared::{write_shared};
 use super::{
     collect_spans_and_sources, scrape_examples_help,
     sidebar::print_sidebar,
@@ -577,27 +575,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         }
 
         if !no_emit_shared {
-            // Build our search index
-            let index = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
-
-            // Write shared runs within a flock; disable thread dispatching of IO temporarily.
-            // write_shared relies on read-after-write for write_parts -> write_merged
-            Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(true);
-
-            let lock_file = cx.dst.join(".lock");
-            let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
-
-            if let Some(parts_out_dir) = &options.parts_out_dir {
-                write_parts(&mut cx, &krate, &parts_out_dir, &index)?;
-            }
-
-            if options.write_rendered_cci {
-                write_search_desc(&cx, &krate, &index)?;
-                write_static_files(&mut cx, &md_opts)?;
-                write_merged(&mut cx, &md_opts)?;
-            }
-
-            Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(false);
+            write_shared(&mut cx, &krate, &md_opts, tcx)?;
         }
 
         Ok((cx, krate))

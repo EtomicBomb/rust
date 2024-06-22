@@ -15,21 +15,28 @@
 
 use std:: marker::PhantomData;
 use std::cell::RefCell;
-use std::fs::{self};
+use std::{fs, io, fmt};
+use std::io::Write as _;
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::ffi::OsString;
+use std::collections::hash_map::Entry;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
+use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
+use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
 use rustc_span::Symbol;
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Deserialize, de::DeserializeOwned, Serializer};
 
 use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
+use crate::html::render::search_index::build_index;
 use crate::html::render::sorted_json::SortedJson;
 use crate::html::render::offset_template::{self, OffsetTemplate};
 use crate::clean::{Crate, Item, ItemId, ItemKind, types::ExternalCrate};
@@ -47,8 +54,78 @@ use crate::html::static_files::{self, suffix_path};
 use crate::visit::DocVisitor;
 use crate::{try_err, try_none};
 
+pub(crate) fn write_shared(
+    cx: &mut Context<'_>,
+    krate: &Crate,
+    options: &RenderOptions,
+    tcx: TyCtxt<'_>,
+) -> Result<(), Error> {
+    let crate_name = krate.name(cx.tcx());
+    let crate_name = crate_name.as_str(); // rand
+    let crate_name_json = SortedJson::serialize(crate_name); // "rand"
+
+    // Write shared runs within a flock; disable thread dispatching of IO temporarily.
+    // write_shared relies on read-after-write for write_parts -> write_merged
+    Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(true);
+
+    let lock_file = cx.dst.join(".lock");
+    let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
+
+    // for current crate
+    let sources = PartsAndLocations::<SourcesPart>::get(cx, krate)?;
+    let serialized_search_index = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
+    let search_index = PartsAndLocations::<SearchIndexPart>::get(cx, &serialized_search_index)?;
+    let all_crates = PartsAndLocations::<AllCratesPart>::get(&crate_name_json)?;
+    let crates_index = PartsAndLocations::<CratesIndexPart>::get(&crate_name)?;
+    let trait_aliases = PartsAndLocations::<TraitAliasPart>::get(cx, &crate_name_json)?;
+    let type_aliases = PartsAndLocations::<TypeAliasPart>::get(cx, krate, &crate_name_json)?;
+
+    if let Some(parts_out_dir) = &options.parts_out_dir {
+        sources.write(cx, parts_out_dir)?;
+        search_index.write(cx, parts_out_dir)?;
+        all_crates.write(cx, parts_out_dir)?;
+        crates_index.write(cx, parts_out_dir)?;
+        trait_aliases.write(cx, parts_out_dir)?;
+        type_aliases.write(cx, parts_out_dir)?;
+    }
+
+    if options.write_rendered_cci {
+        write_static_files(cx, &options)?;
+        write_search_desc(cx, &krate, &serialized_search_index)?;
+        let parts_paths  = &options.parts_paths;
+        let read_rendered_cci = options.read_rendered_cci;
+
+        if options.emit.is_empty() || options.emit.contains(&EmitType::InvocationSpecific) {
+            if cx.include_sources {
+                write_rendered_cci::<SourcesPart>(cx, read_rendered_cci, &parts_paths, &sources)?;
+            }
+            write_rendered_cci::<SearchIndexPart>(cx, read_rendered_cci, &parts_paths, &search_index)?;
+            write_rendered_cci::<AllCratesPart>(cx, read_rendered_cci, &parts_paths, &all_crates)?;
+        }
+        write_rendered_cci::<TraitAliasPart>(cx, read_rendered_cci, &parts_paths, &trait_aliases)?;
+        write_rendered_cci::<TypeAliasPart>(cx, read_rendered_cci, &parts_paths, &type_aliases)?;
+        if options.enable_index_page {
+            match &options.index_page {
+                Some(index_page) => {
+                    let mut md_opts = options.clone();
+                    md_opts.output = cx.dst.clone();
+                    md_opts.external_html = cx.shared.layout.external_html.clone();
+                    crate::markdown::render(&index_page, md_opts, cx.shared.edition())
+                        .map_err(|e| Error::new(e, &index_page))?;
+                }
+                None => {
+                    write_rendered_cci::<CratesIndexPart>(cx, read_rendered_cci, &parts_paths, &crates_index)?;
+                }
+            }
+        }
+    }
+
+    Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(false);
+    Ok(())
+}
+
 /// Writes the static files, the style files, and the css extensions
-pub(crate) fn write_static_files(
+fn write_static_files(
     cx: &mut Context<'_>,
     options: &RenderOptions,
 ) -> Result<(), Error> {
@@ -93,7 +170,52 @@ pub(crate) fn write_static_files(
     Ok(())
 }
 
-/// Gets the paths to all locally documented crates.
+/// Write the search description shards to disk
+fn write_search_desc(cx: &Context<'_>, krate: &Crate, search_index: &SerializedSearchIndex) -> Result<(), Error> {
+    let crate_name = krate.name(cx.tcx()).to_string();
+    let encoded_crate_name = SortedJson::serialize(&crate_name);
+    let path = PathBuf::from_iter([&cx.dst, Path::new("search.desc"), Path::new(&crate_name)]);
+    if Path::new(&path).exists() {
+        try_err!(fs::remove_dir_all(&path), &path);
+    }
+    for (i, (_, part)) in search_index.desc.iter().enumerate() {
+        let filename = static_files::suffix_path(
+            &format!("{crate_name}-desc-{i}-.js"),
+            &cx.shared.resource_suffix,
+        );
+        let path = path.join(filename);
+        let part = SortedJson::serialize(&part);
+        let part = format!("searchState.loadedDescShard({encoded_crate_name}, {i}, {part})");
+        write_create_parents(cx, path, part)?;
+    }
+    Ok(())
+}
+
+/// A piece of one of the shared artifacts for documentation (search index, sources, alias list, etc.)
+///
+/// Merged at a user specified time and written to the `doc/` directory
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(transparent)]
+struct Part<T, U> {
+    #[serde(skip)]
+    _artifact: PhantomData<T>,
+    item: U,
+}
+
+impl<T, U: fmt::Display> fmt::Display for Part<T, U> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.item)
+    }
+}
+
+pub(crate) trait NamedPart: Sized {
+    /// Identifies the kind of cross crate information.
+    ///
+    /// The cci type name in `doc.parts/<cci type>`
+    const NAME: &'static str;
+    type FileFormat: offset_template::FileFormat;
+    fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat>;
+}
 
 /// Paths (relative to `doc/`) and their pre-merge contents
 #[derive(Serialize, Deserialize)]
@@ -123,69 +245,11 @@ impl<T, U> PartsAndLocations<Part<T, U>> {
 impl<T, U: Serialize> PartsAndLocations<Part<T, U>>
 where Part<T, U>: NamedPart,
 {
-    fn write(self, cx: &mut Context<'_>, parts_path: &PathToParts) -> Result<(), Error> {
+    fn write(&self, cx: &Context<'_>, parts_path: &PathToParts) -> Result<(), Error> {
         let name = ExternalCrate::LOCAL.name(cx.tcx());
         let path = parts_path.cci_path::<Part<T, U>>(name.as_str());
-        write_create_parents(cx, path, serde_json::to_string(&self).unwrap())?;
+        write_create_parents(cx, path, serde_json::to_string(self).unwrap())?;
         Ok(())
-    }
-}
-
-/// A piece of one of the shared artifacts for documentation (search index, sources, alias list, etc.)
-///
-/// Merged at a user specified time and written to the `doc/` directory
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(transparent)]
-struct Part<T, U> {
-    #[serde(skip)]
-    _artifact: PhantomData<T>,
-    item: U,
-}
-
-impl<T: DeserializeOwned, U: DeserializeOwned> Part<T, U>
-where Self: NamedPart,
-{
-    /// Yields a fully qualified path and the collected parts that should be rendered and
-    /// written there.
-    fn read_merged_parts(cx: &Context<'_>, read_rendered_cci: bool, parts_paths: &[(&str, &PathToParts)]) -> Result<FxHashMap<PathBuf, Vec<U>>, Error> {
-        let mut ret: FxHashMap<PathBuf, Vec<U>> = Default::default();
-        if read_rendered_cci {
-            eprintln!("todo");
-//             let (path, part) = Self::read_rendered(&cx.dst);
-//             ret.entry(path).or_default().push(part.item);
-        }
-        for (crate_name, parts_path) in parts_paths.iter() {
-            let path = parts_path.cci_path::<Self>(crate_name);
-            let parts = try_err!(fs::read(&path), &path);
-            let parts: PartsAndLocations::<Self> = try_err!(serde_json::from_slice(&parts), &path);
-            for (path, part) in parts.parts {
-                let path = cx.dst.join(path);
-                ret.entry(path).or_default().push(part.item);
-            }
-        }
-        Ok(ret)
-    }
-}
-
-pub(crate) trait NamedPart: Sized {
-    /// Identifies the kind of cross crate information.
-    ///
-    /// The cci type name in `doc.parts/<cci type>`
-    const NAME: &'static str;
-
-    type FileFormat;
-    fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat>;
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
-struct Sources;
-type SourcesPart = Part<Sources, SortedJson>;
-impl NamedPart for SourcesPart {
-    const NAME: &'static str = "src-files-js";
-
-    type FileFormat = offset_template::Js;
-    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after("var srcIndex = new Map([",  "]); createSrcSidebar()")
     }
 }
 
@@ -194,13 +258,17 @@ struct SearchIndex;
 type SearchIndexPart = Part<SearchIndex, SortedJson>;
 impl NamedPart for SearchIndexPart {
     const NAME: &'static str = "search-index-js";
-
     type FileFormat = offset_template::Js;
     fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
         OffsetTemplate::before_after("var searchIndex = new Map([", "]);
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
-else if (window.initSearch) window.initSearch(searchIndex);
-")
+else if (window.initSearch) window.initSearch(searchIndex);")
+    }
+}
+impl PartsAndLocations<SearchIndexPart> {
+    fn get(cx: &Context<'_>, search_index: &SerializedSearchIndex) -> Result<Self, Error> {
+        let path = suffix_path("search-index.js", &cx.shared.resource_suffix);
+        Ok(Self::with(path, SortedJson::serialize(&search_index.index)))
     }
 }
 
@@ -214,13 +282,18 @@ impl NamedPart for AllCratesPart {
         OffsetTemplate::before_after("window.ALL_CRATES = [", "];")
     }
 }
+impl PartsAndLocations<AllCratesPart> {
+    fn get(crate_name_json: &SortedJson) -> Result<Self, Error> {
+        let path = PathBuf::from("crates.js");
+        Ok(Self::with(path, crate_name_json.clone()))
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct CratesIndex;
 type CratesIndexPart = Part<CratesIndex, String>;
 impl NamedPart for CratesIndexPart {
     const NAME: &'static str = "index-html";
-
     type FileFormat = offset_template::Html;
     fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
         let mut magic = String::from("\u{FFFC}");
@@ -246,22 +319,117 @@ impl NamedPart for CratesIndexPart {
         }
     }
 }
+impl PartsAndLocations<CratesIndexPart> {
+    fn get(crate_name: &str) -> Result<Self, Error> {
+        let path = PathBuf::from("index.html");
+        let part = format!(
+            "<li><a href=\"{trailing_slash}index.html\">{crate_name}</a></li>",
+            trailing_slash = ensure_trailing_slash(crate_name),
+        );
+        Ok(Self::with(path, part))
+    }
+}
 
-//             parts.into_iter().format_with("", |k, f| {
-//                 f(&format_args!(
-//                     "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
-//                     trailing_slash = ensure_trailing_slash(&k),
-//                 ))
-//             })
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+struct Sources;
+type SourcesPart = Part<Sources, SortedJson>;
+impl NamedPart for SourcesPart {
+    const NAME: &'static str = "src-files-js";
+    type FileFormat = offset_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+        // This needs to be `var`, not `const`.
+        // This variable needs declared in the current global scope so that if
+        // src-script.js loads first, it can pick it up.
+        OffsetTemplate::before_after("var srcIndex = new Map([", "]); createSrcSidebar();")
+    }
+}
+impl PartsAndLocations<SourcesPart> {
+    fn get(cx: &Context<'_>, _krate: &Crate) -> Result<Self, Error> {
+        let hierarchy = Rc::new(Hierarchy::default());
+        cx
+            .shared
+            .local_sources
+            .iter()
+            .filter_map(|p| p.0.strip_prefix(&cx.shared.src_root).ok())
+            .for_each(|source| hierarchy.add_path(source));
+        let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
+        Ok(Self::with(path, hierarchy.to_json_string()))
+    }
+}
+
+/// Source files directory tree
+#[derive(Debug, Default)]
+struct Hierarchy {
+    parent: Weak<Self>,
+    elem: OsString,
+    children: RefCell<FxHashMap<OsString, Rc<Self>>>,
+    elems: RefCell<FxHashSet<OsString>>,
+}
+
+impl Hierarchy {
+    fn with_parent(elem: OsString, parent: &Rc<Self>) -> Self {
+        Self { elem, parent: Rc::downgrade(parent), ..Self::default() }
+    }
+
+    fn to_json_string(&self) -> SortedJson {
+        let subs = self.children.borrow();
+        let files = self.elems.borrow();
+        let name = SortedJson::serialize(self.elem.to_str().expect("invalid osstring conversion"));
+        let mut out = Vec::from([name]);
+        if !subs.is_empty() || !files.is_empty() {
+            let subs = subs.iter().map(|(_, s)| s.to_json_string());
+            out.push(SortedJson::array(subs));
+        }
+        if !files.is_empty() {
+            let files = files.iter().map(|s| SortedJson::serialize(s.to_str().expect("invalid osstring")));
+            out.push(SortedJson::array(files));
+        }
+        SortedJson::array_unsorted(out)
+    }
+
+    fn add_path(self: &Rc<Self>, path: &Path) {
+        let mut h = Rc::clone(&self);
+        let mut elems = path
+            .components()
+            .filter_map(|s| match s {
+                Component::Normal(s) => Some(s.to_owned()),
+                Component::ParentDir => Some(OsString::from("..")),
+                _ => None,
+            })
+            .peekable();
+        loop {
+            let cur_elem = elems.next().expect("empty file path");
+            if cur_elem == ".." {
+                if let Some(parent) = h.parent.upgrade() {
+                    h = parent;
+                }
+                continue;
+            }
+            if elems.peek().is_none() {
+                h.elems.borrow_mut().insert(cur_elem);
+                break;
+            } else {
+                let entry = Rc::clone(
+                    h.children
+                        .borrow_mut()
+                        .entry(cur_elem.clone())
+                        .or_insert_with(|| Rc::new(Self::with_parent(cur_elem, &h))),
+                );
+                h = entry;
+            }
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TypeAlias;
-type TypeAliasPart = Part<TypeAlias, (SortedJson, SortedJson)>;
+type TypeAliasPart = Part<TypeAlias, SortedJson>;
 impl NamedPart for TypeAliasPart {
     const NAME: &'static str = "type-impl";
     type FileFormat = offset_template::Js;
     fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after(r"(function() {var type_impls = {", r"};
+        OffsetTemplate::before_after(r"(function() {
+    var type_impls = Object.fromEntries([", r"]);
     if (window.register_type_impls) {
         window.register_type_impls(type_impls);
     } else {
@@ -271,15 +439,114 @@ impl NamedPart for TypeAliasPart {
     }
 }
 
+impl PartsAndLocations<TypeAliasPart> {
+    fn get(cx: &mut Context<'_>, krate: &Crate, crate_name_json: &SortedJson) -> Result<Self, Error> {
+        let cache = &Rc::clone(&cx.shared).cache;
+        let mut path_parts = Self::default();
+
+        let mut type_impl_collector = TypeImplCollector {
+            aliased_types: IndexMap::default(),
+            visited_aliases: FxHashSet::default(),
+            cache,
+            cx,
+        };
+        DocVisitor::visit_crate(&mut type_impl_collector, &krate);
+        let cx = type_impl_collector.cx;
+        let aliased_types = type_impl_collector.aliased_types;
+        for aliased_type in aliased_types.values() {
+            let impls = aliased_type
+                .impl_
+                .values()
+                .flat_map(|AliasedTypeImpl { impl_, type_aliases }| {
+                    let mut ret = Vec::new();
+                    let trait_ = impl_
+                        .inner_impl()
+                        .trait_
+                        .as_ref()
+                        .map(|trait_| format!("{:#}", trait_.print(cx)));
+                    // render_impl will filter out "impossible-to-call" methods
+                    // to make that functionality work here, it needs to be called with
+                    // each type alias, and if it gives a different result, split the impl
+                    for &(type_alias_fqp, ref type_alias_item) in type_aliases {
+                        let mut buf = Buffer::html();
+                        cx.id_map = Default::default();
+                        cx.deref_id_map = Default::default();
+                        let target_did = impl_
+                            .inner_impl()
+                            .trait_
+                            .as_ref()
+                            .map(|trait_| trait_.def_id())
+                            .or_else(|| impl_.inner_impl().for_.def_id(cache));
+                        let provided_methods;
+                        let assoc_link = if let Some(target_did) = target_did {
+                            provided_methods = impl_.inner_impl().provided_trait_methods(cx.tcx());
+                            AssocItemLink::GotoSource(ItemId::DefId(target_did), &provided_methods)
+                        } else {
+                            AssocItemLink::Anchor(None)
+                        };
+                        super::render_impl(
+                            &mut buf,
+                            cx,
+                            *impl_,
+                            &type_alias_item,
+                            assoc_link,
+                            RenderMode::Normal,
+                            None,
+                            &[],
+                            ImplRenderingParameters {
+                                show_def_docs: true,
+                                show_default_items: true,
+                                show_non_assoc_items: true,
+                                toggle_open_by_default: true,
+                            },
+                        );
+                        let text = buf.into_inner();
+                        let type_alias_fqp = (*type_alias_fqp).iter().join("::");
+                        if Some(&text) == ret.last().map(|s: &AliasSerializableImpl| &s.text) {
+                            ret.last_mut()
+                                .expect("already established that ret.last() is Some()")
+                                .aliases
+                                .push(type_alias_fqp);
+                        } else {
+                            ret.push(AliasSerializableImpl {
+                                text,
+                                trait_: trait_.clone(),
+                                aliases: vec![type_alias_fqp],
+                            })
+                        }
+                    }
+                    ret
+                })
+                .collect::<Vec<_>>();
+
+            let mut path = PathBuf::from("type.impl");
+            for component in &aliased_type.target_fqp[..aliased_type.target_fqp.len() - 1] {
+                path.push(component.as_str());
+            }
+            let aliased_item_type = aliased_type.target_type;
+            path.push(&format!(
+                "{aliased_item_type}.{}.js",
+                aliased_type.target_fqp[aliased_type.target_fqp.len() - 1]
+            ));
+
+            let part = SortedJson::array(impls.iter().map(SortedJson::serialize).collect::<Vec<_>>());
+            path_parts.push(path, SortedJson::array_unsorted([crate_name_json.clone(), part]));
+        }
+        Ok(path_parts)
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 struct TraitAlias;
-type TraitAliasPart = Part<TraitAlias, (SortedJson, SortedJson)>;
+type TraitAliasPart = Part<TraitAlias, SortedJson>;
 impl NamedPart for TraitAliasPart {
     const NAME: &'static str = "trait-impl";
 
     type FileFormat = offset_template::Js;
     fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after(r"(function() {var implementors = {", r"};
+        OffsetTemplate::before_after(r"(function() {
+    var implementors = Object.fromEntries([", r"]);
     if (window.register_implementors) {
         window.register_implementors(implementors);
     } else {
@@ -288,112 +555,71 @@ impl NamedPart for TraitAliasPart {
 })())")
     }
 }
+impl PartsAndLocations<TraitAliasPart> {
+    fn get(cx: &mut Context<'_>, crate_name_json: &SortedJson) -> Result<Self, Error> {
+        let cache = &cx.shared.cache;
+        let mut path_parts = Self::default();
+        // Update the list of all implementors for traits
+        // <https://github.com/search?q=repo%3Arust-lang%2Frust+[RUSTDOCIMPL]+trait.impl&type=code>
+        for (&did, imps) in &cache.implementors {
+            // Private modules can leak through to this phase of rustdoc, which
+            // could contain implementations for otherwise private types. In some
+            // rare cases we could find an implementation for an item which wasn't
+            // indexed, so we just skip this step in that case.
+            //
+            // FIXME: this is a vague explanation for why this can't be a `get`, in
+            //        theory it should be...
+            let (remote_path, remote_item_type) = match cache.exact_paths.get(&did) {
+                Some(p) => match cache.paths.get(&did).or_else(|| cache.external_paths.get(&did)) {
+                    Some((_, t)) => (p, t),
+                    None => continue,
+                },
+                None => match cache.external_paths.get(&did) {
+                    Some((p, t)) => (p, t),
+                    None => continue,
+                },
+            };
 
-fn write_create_parents(cx: &Context<'_>, path: PathBuf, content: String) -> Result<(), Error> {
-    let parent = path.parent().expect("trying to write to an empty path");
-    try_err!(cx.shared.fs.create_dir_all(parent), parent);
-    cx.shared.fs.write(path, content)?;
-    Ok(())
-}
+            let implementors = imps
+                .iter()
+                .filter_map(|imp| {
+                    // If the trait and implementation are in the same crate, then
+                    // there's no need to emit information about it (there's inlining
+                    // going on). If they're in different crates then the crate defining
+                    // the trait will be interested in our implementation.
+                    //
+                    // If the implementation is from another crate then that crate
+                    // should add it.
+                    if imp.impl_item.item_id.krate() == did.krate || !imp.impl_item.item_id.is_local() {
+                        None
+                    } else {
+                        Some(Implementor {
+                            text: imp.inner_impl().print(false, cx).to_string(),
+                            synthetic: imp.inner_impl().kind.is_auto(),
+                            types: collect_paths_for_type(imp.inner_impl().for_.clone(), cache),
+                        })
+                    }
+                })
+                .collect::<Vec<_>>();
 
-/// Renders and writes the cross crate information to the out dir
-pub(crate) fn write_merged(
-    cx: &mut Context<'_>,
-    options: &RenderOptions,
-) -> Result<(), Error> {
-
-    let name = ExternalCrate::LOCAL.name(cx.tcx());
-    let parts_out_dir = options.parts_out_dir.as_ref().map(|parts_out_dir| (name.as_str(), parts_out_dir));
-    let parts_paths: Vec<_> = options.parts_paths.iter().map(|(crate_name, path_to_parts)| (crate_name.as_ref(), path_to_parts)).chain(parts_out_dir).collect();
-    let emit_invocation_specific = options.emit.is_empty() || options.emit.contains(&EmitType::InvocationSpecific);
-    let read_rendered_cci = options.read_rendered_cci;
-
-    if cx.include_sources && emit_invocation_specific {
-        for (path, part) in SourcesPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-            let sources = SortedJson::array(part.into_iter());
-            // This needs to be `var`, not `const`.
-            // This variable needs declared in the current global scope so that if
-            // src-script.js loads first, it can pick it up.
-            let content = format!("var srcIndex = new Map({sources}); createSrcSidebar();");
-            write_create_parents(cx, path, content)?;
-        }
-    }
-
-    if emit_invocation_specific {
-        for (path, part) in SearchIndexPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-            let all_indexes = SortedJson::array(part.into_iter());
-            write_create_parents(cx, path, format!(r"var searchIndex = new Map({all_indexes});
-if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
-else if (window.initSearch) window.initSearch(searchIndex);
-"))?;
-        }
-    }
-
-    if emit_invocation_specific {
-        for (path, part) in AllCratesPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-            let crates = SortedJson::array(part.into_iter());
-            write_create_parents(cx, path, format!("window.ALL_CRATES = {crates};"))?;
-        }
-    }
-
-    if options.enable_index_page {
-        for (path, parts) in CratesIndexPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-            if let Some(index_page) = options.index_page.clone() {
-                let mut md_opts = options.clone();
-                md_opts.output = cx.dst.clone();
-                md_opts.external_html = (*cx.shared).layout.external_html.clone();
-                crate::markdown::render(&index_page, md_opts, cx.shared.edition())
-                    .map_err(|e| Error::new(e, &index_page))?;
-            } else {
-                let page = layout::Page {
-                    title: "Index of crates",
-                    css_class: "mod sys",
-                    root_path: "./",
-                    static_root_path: cx.shared.static_root_path.as_deref(),
-                    description: "List of crates",
-                    resource_suffix: &cx.shared.resource_suffix,
-                    rust_logo: true,
-                };
-                let layout = &cx.shared.layout;
-                let style_files = &cx.shared.style_files;
-                let content = format!(
-                    "<h1>List of all crates</h1><ul class=\"all-items\">{}</ul>",
-                    parts.into_iter().format_with("", |k, f| {
-                        f(&format_args!(
-                            "<li><a href=\"{trailing_slash}index.html\">{k}</a></li>",
-                            trailing_slash = ensure_trailing_slash(&k),
-                        ))
-                    })
-                );
-                let part = layout::render(layout, &page, "", content, &style_files);
-                write_create_parents(cx, path, part)?;
+            // Only create a js file if we have impls to add to it. If the trait is
+            // documented locally though we always create the file to avoid dead
+            // links.
+            if implementors.is_empty() && !cache.paths.contains_key(&did) {
+                continue;
             }
+
+            let mut path = PathBuf::from("trait.impl");
+            for component in &remote_path[..remote_path.len() - 1] {
+                path.push(component.as_str());
+            }
+            path.push(&format!("{remote_item_type}.{}.js", remote_path[remote_path.len() - 1]));
+
+            let part = SortedJson::array(implementors.iter().map(SortedJson::serialize).collect::<Vec<_>>());
+            path_parts.push(path, SortedJson::array_unsorted([crate_name_json.clone(), part]));
         }
+        Ok(path_parts)
     }
-
-    let implementors_iife = |impls, register, pending, json| {
-            format!(r"(function() {{
-var {impls} = {json};
-if (window.{register}) {{
-    window.{register}({impls});
-}} else {{
-    window.{pending} = {impls};
-}}
-}})();
-")
-    };
-
-    for (path, part) in TypeAliasPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-        let part = SortedJson::object(part.into_iter());
-        write_create_parents(cx, path, implementors_iife("type_impls", "register_type_impls", "pending_type_impls", part))?;
-    }
-
-    for (path, part) in TraitAliasPart::read_merged_parts(cx, read_rendered_cci, &parts_paths)? {
-        let part = SortedJson::object(part.into_iter());
-        write_create_parents(cx, path, implementors_iife("implementors", "register_implementors", "pending_implementors", part))?;
-    }
-
-    Ok(())
 }
 
 struct Implementor {
@@ -563,283 +789,57 @@ impl Serialize for AliasSerializableImpl {
     }
 }
 
-/// Source files directory tree
-#[derive(Debug, Default)]
-struct Hierarchy {
-    parent: Weak<Self>,
-    elem: OsString,
-    children: RefCell<FxHashMap<OsString, Rc<Self>>>,
-    elems: RefCell<FxHashSet<OsString>>,
-}
-
-impl Hierarchy {
-    fn with_parent(elem: OsString, parent: &Rc<Self>) -> Self {
-        Self { elem, parent: Rc::downgrade(parent), ..Self::default() }
-    }
-
-    fn to_json_string(&self) -> SortedJson {
-        let subs = self.children.borrow();
-        let files = self.elems.borrow();
-        let name = SortedJson::serialize(self.elem.to_str().expect("invalid osstring conversion"));
-        let mut out = Vec::from([name]);
-        if !subs.is_empty() || !files.is_empty() {
-            let subs = subs.iter().map(|(_, s)| s.to_json_string());
-            out.push(SortedJson::array(subs));
-        }
-        if !files.is_empty() {
-            let files = files.iter().map(|s| SortedJson::serialize(s.to_str().expect("invalid osstring")));
-            out.push(SortedJson::array(files));
-        }
-        SortedJson::array_unsorted(out)
-    }
-
-    fn add_path(self: &Rc<Self>, path: &Path) {
-        let mut h = Rc::clone(&self);
-        let mut elems = path
-            .components()
-            .filter_map(|s| match s {
-                Component::Normal(s) => Some(s.to_owned()),
-                Component::ParentDir => Some(OsString::from("..")),
-                _ => None,
-            })
-            .peekable();
-        loop {
-            let cur_elem = elems.next().expect("empty file path");
-            if cur_elem == ".." {
-                if let Some(parent) = h.parent.upgrade() {
-                    h = parent;
-                }
-                continue;
-            }
-            if elems.peek().is_none() {
-                h.elems.borrow_mut().insert(cur_elem);
-                break;
-            } else {
-                let entry = Rc::clone(
-                    h.children
-                        .borrow_mut()
-                        .entry(cur_elem.clone())
-                        .or_insert_with(|| Rc::new(Self::with_parent(cur_elem, &h))),
-                );
-                h = entry;
-            }
-        }
-    }
-}
-
-pub(crate) fn write_search_desc(cx: &Context<'_>, krate: &Crate, search_index: &SerializedSearchIndex) -> Result<(), Error> {
-    let crate_name = krate.name(cx.tcx()).to_string();
-    let encoded_crate_name = SortedJson::serialize(&crate_name);
-
-    let path = PathBuf::from_iter([&cx.dst, Path::new("search.desc"), Path::new(&crate_name)]);
-    if Path::new(&path).exists() {
-        try_err!(fs::remove_dir_all(&path), &path);
-    }
-
-    for (i, (_, part)) in search_index.desc.iter().enumerate() {
-        let filename = static_files::suffix_path(
-            &format!("{crate_name}-desc-{i}-.js"),
-            &cx.shared.resource_suffix,
-        );
-        let path = path.join(filename);
-        let part = SortedJson::serialize(&part);
-        let part = format!("searchState.loadedDescShard({encoded_crate_name}, {i}, {part})");
-        write_create_parents(cx, path, part)?;
-    }
+fn write_create_parents(cx: &Context<'_>, path: PathBuf, content: String) -> Result<(), Error> {
+    let parent = path.parent().expect("trying to write to an empty path");
+    try_err!(cx.shared.fs.create_dir_all(parent), parent);
+    cx.shared.fs.write(path, content)?;
     Ok(())
-
 }
 
-/// Documents the shared artifacts from `krate` to the `doc/.parts` directory
-pub(crate) fn write_parts(
-    cx: &mut Context<'_>,
-    krate: &Crate,
-    parts_out_dir: &PathToParts,
-    search_index: &SerializedSearchIndex,
+fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display>(
+    cx: &Context<'_>,
+    read_rendered_cci: bool,
+    parts_paths: &FxHashMap<String, PathToParts>,
+    our_parts_and_locations: &PartsAndLocations<T>,
 ) -> Result<(), Error> {
-    // Write out the shared files. Note that these are shared among all rustdoc
-    // docs placed in the output directory, so this needs to be a synchronized
-    // operation with respect to all other rustdocs running around.
-
-    let crate_name = krate.name(cx.tcx()).to_string();
-    let encoded_crate_name = SortedJson::serialize(&crate_name);
-
-    let path = PathBuf::from("index.html");
-    PartsAndLocations::<CratesIndexPart>::with(path, crate_name.clone()).write(cx, parts_out_dir)?;
-
-    let path = PathBuf::from("crates.js");
-    PartsAndLocations::<AllCratesPart>::with(path, encoded_crate_name.clone()).write(cx, parts_out_dir)?;
-
-    let hierarchy = Rc::new(Hierarchy::default());
-    for source in cx
-        .shared
-        .local_sources
-        .iter()
-        .filter_map(|p| p.0.strip_prefix(&cx.shared.src_root).ok())
-    {
-        hierarchy.add_path(source);
-    }
-    let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
-    PartsAndLocations::<SourcesPart>::with(path, hierarchy.to_json_string()).write(cx, parts_out_dir)?;
-
-    let path = suffix_path("search-index.js", &cx.shared.resource_suffix);
-    PartsAndLocations::<SearchIndexPart>::with(path, SortedJson::serialize(&search_index.index)).write(cx, parts_out_dir)?;
-
-    let cloned_shared = Rc::clone(&cx.shared);
-    let cache = &cloned_shared.cache;
-
-    let mut type_impl_collector = TypeImplCollector {
-        aliased_types: IndexMap::default(),
-        visited_aliases: FxHashSet::default(),
-        cache,
-        cx,
-    };
-    let mut path_parts = PartsAndLocations::<TypeAliasPart>::default();
-    DocVisitor::visit_crate(&mut type_impl_collector, &krate);
-    let cx = type_impl_collector.cx;
-    let aliased_types = type_impl_collector.aliased_types;
-    for aliased_type in aliased_types.values() {
-        let impls = aliased_type
-            .impl_
-            .values()
-            .flat_map(|AliasedTypeImpl { impl_, type_aliases }| {
-                let mut ret = Vec::new();
-                let trait_ = impl_
-                    .inner_impl()
-                    .trait_
-                    .as_ref()
-                    .map(|trait_| format!("{:#}", trait_.print(cx)));
-                // render_impl will filter out "impossible-to-call" methods
-                // to make that functionality work here, it needs to be called with
-                // each type alias, and if it gives a different result, split the impl
-                for &(type_alias_fqp, ref type_alias_item) in type_aliases {
-                    let mut buf = Buffer::html();
-                    cx.id_map = Default::default();
-                    cx.deref_id_map = Default::default();
-                    let target_did = impl_
-                        .inner_impl()
-                        .trait_
-                        .as_ref()
-                        .map(|trait_| trait_.def_id())
-                        .or_else(|| impl_.inner_impl().for_.def_id(cache));
-                    let provided_methods;
-                    let assoc_link = if let Some(target_did) = target_did {
-                        provided_methods = impl_.inner_impl().provided_trait_methods(cx.tcx());
-                        AssocItemLink::GotoSource(ItemId::DefId(target_did), &provided_methods)
-                    } else {
-                        AssocItemLink::Anchor(None)
-                    };
-                    super::render_impl(
-                        &mut buf,
-                        cx,
-                        *impl_,
-                        &type_alias_item,
-                        assoc_link,
-                        RenderMode::Normal,
-                        None,
-                        &[],
-                        ImplRenderingParameters {
-                            show_def_docs: true,
-                            show_default_items: true,
-                            show_non_assoc_items: true,
-                            toggle_open_by_default: true,
-                        },
-                    );
-                    let text = buf.into_inner();
-                    let type_alias_fqp = (*type_alias_fqp).iter().join("::");
-                    if Some(&text) == ret.last().map(|s: &AliasSerializableImpl| &s.text) {
-                        ret.last_mut()
-                            .expect("already established that ret.last() is Some()")
-                            .aliases
-                            .push(type_alias_fqp);
-                    } else {
-                        ret.push(AliasSerializableImpl {
-                            text,
-                            trait_: trait_.clone(),
-                            aliases: vec![type_alias_fqp],
-                        })
+    let path_parts = parts_paths.iter()
+        .map(|(crate_name, parts_path)| {
+            let path = parts_path.cci_path::<T>(crate_name);
+            let parts = try_err!(fs::read(&path), &path);
+            let parts: PartsAndLocations::<T> = try_err!(serde_json::from_slice(&parts), &path);
+            Ok::<_, Error>(parts)
+        })
+        .collect::<Result<Vec<PartsAndLocations<T>>, Error>>()?;
+    let path_parts = path_parts.iter()
+        .map(|parts_and_locations| parts_and_locations.parts.iter())
+        .flatten()
+        .chain(our_parts_and_locations.parts.iter());
+    let mut templates: FxHashMap<PathBuf, OffsetTemplate<T::FileFormat>> = Default::default();
+    for (path, part) in path_parts {
+        let part = format!("{part}");
+        let path = cx.dst.join(path);
+        match templates.entry(path.clone()) {
+            Entry::Vacant(entry) => {
+                let template = entry.insert(if read_rendered_cci {
+                    match fs::read_to_string(&path) {
+                        Ok(template) => try_err!(OffsetTemplate::try_from(template), &path),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => T::blank_template(cx),
+                        Err(e) => return Err(Error::new(e, &path)),
                     }
-                }
-                ret
-            })
-            .collect::<Vec<_>>();
-
-        let mut path = PathBuf::from("type.impl");
-        for component in &aliased_type.target_fqp[..aliased_type.target_fqp.len() - 1] {
-            path.push(component.as_str());
-        }
-        let aliased_item_type = aliased_type.target_type;
-        path.push(&format!(
-            "{aliased_item_type}.{}.js",
-            aliased_type.target_fqp[aliased_type.target_fqp.len() - 1]
-        ));
-
-        let part = SortedJson::array(impls.iter().map(SortedJson::serialize).collect::<Vec<_>>());
-        path_parts.push(path, (encoded_crate_name.clone(), part));
-    }
-    path_parts.write(cx, parts_out_dir)?;
-
-    let mut path_parts = PartsAndLocations::<TraitAliasPart>::default();
-    // Update the list of all implementors for traits
-    // <https://github.com/search?q=repo%3Arust-lang%2Frust+[RUSTDOCIMPL]+trait.impl&type=code>
-    for (&did, imps) in &cache.implementors {
-        // Private modules can leak through to this phase of rustdoc, which
-        // could contain implementations for otherwise private types. In some
-        // rare cases we could find an implementation for an item which wasn't
-        // indexed, so we just skip this step in that case.
-        //
-        // FIXME: this is a vague explanation for why this can't be a `get`, in
-        //        theory it should be...
-        let (remote_path, remote_item_type) = match cache.exact_paths.get(&did) {
-            Some(p) => match cache.paths.get(&did).or_else(|| cache.external_paths.get(&did)) {
-                Some((_, t)) => (p, t),
-                None => continue,
-            },
-            None => match cache.external_paths.get(&did) {
-                Some((p, t)) => (p, t),
-                None => continue,
-            },
-        };
-
-        let implementors = imps
-            .iter()
-            .filter_map(|imp| {
-                // If the trait and implementation are in the same crate, then
-                // there's no need to emit information about it (there's inlining
-                // going on). If they're in different crates then the crate defining
-                // the trait will be interested in our implementation.
-                //
-                // If the implementation is from another crate then that crate
-                // should add it.
-                if imp.impl_item.item_id.krate() == did.krate || !imp.impl_item.item_id.is_local() {
-                    None
                 } else {
-                    Some(Implementor {
-                        text: imp.inner_impl().print(false, cx).to_string(),
-                        synthetic: imp.inner_impl().kind.is_auto(),
-                        types: collect_paths_for_type(imp.inner_impl().for_.clone(), cache),
-                    })
-                }
-            })
-            .collect::<Vec<_>>();
-
-        // Only create a js file if we have impls to add to it. If the trait is
-        // documented locally though we always create the file to avoid dead
-        // links.
-        if implementors.is_empty() && !cache.paths.contains_key(&did) {
-            continue;
+                    T::blank_template(cx)
+                });
+                try_err!(template.append(&part), &path)
+            }
+            Entry::Occupied(mut t) => try_err!(t.get_mut().append(&part), &path),
         }
-
-        let mut path = PathBuf::from("trait.impl");
-        for component in &remote_path[..remote_path.len() - 1] {
-            path.push(component.as_str());
-        }
-        path.push(&format!("{remote_item_type}.{}.js", remote_path[remote_path.len() - 1]));
-
-        let part = SortedJson::array(implementors.iter().map(SortedJson::serialize).collect::<Vec<_>>());
-        path_parts.push(path, (encoded_crate_name.clone(), part));
     }
-    path_parts.write(cx, parts_out_dir)?;
-
+    for (path, template) in templates {
+        let file = try_err!(File::create(&path), &path);
+        let mut file = BufWriter::new(file);
+        try_err!(write!(file, "{template}"), &path);
+        try_err!(file.flush(), &path);
+    }
     Ok(())
 }
+
