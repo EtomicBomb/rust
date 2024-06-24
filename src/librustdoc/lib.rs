@@ -607,7 +607,7 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optopt(
                 "",
                 "write-rendered-cci",
-                "Writes the cross-crate information to the doc root. \
+                "Writes merged cross-crate information to the doc root. \
                 Defaults to true.",
                 "[true|false]",
             )

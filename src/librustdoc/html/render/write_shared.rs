@@ -57,30 +57,29 @@ use crate::{try_err, try_none};
 pub(crate) fn write_shared(
     cx: &mut Context<'_>,
     krate: &Crate,
-    options: &RenderOptions,
+    opt: &RenderOptions,
     tcx: TyCtxt<'_>,
 ) -> Result<(), Error> {
     let crate_name = krate.name(cx.tcx());
     let crate_name = crate_name.as_str(); // rand
     let crate_name_json = SortedJson::serialize(crate_name); // "rand"
 
-    // Write shared runs within a flock; disable thread dispatching of IO temporarily.
-    // write_shared relies on read-after-write for write_parts -> write_merged
-    Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(true);
-
-    let lock_file = cx.dst.join(".lock");
-    let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
-
     // for current crate
-    let sources = PartsAndLocations::<SourcesPart>::get(cx, krate)?;
+    let sources = PartsAndLocations::<SourcesPart>::get(cx)?;
     let serialized_search_index = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
     let search_index = PartsAndLocations::<SearchIndexPart>::get(cx, &serialized_search_index)?;
-    let all_crates = PartsAndLocations::<AllCratesPart>::get(&crate_name_json)?;
+    let all_crates = PartsAndLocations::<AllCratesPart>::get(crate_name_json.clone())?;
     let crates_index = PartsAndLocations::<CratesIndexPart>::get(&crate_name)?;
     let trait_aliases = PartsAndLocations::<TraitAliasPart>::get(cx, &crate_name_json)?;
     let type_aliases = PartsAndLocations::<TypeAliasPart>::get(cx, krate, &crate_name_json)?;
 
-    if let Some(parts_out_dir) = &options.parts_out_dir {
+    // NOTE(EtomicBomb): I don't think we need sync here because no read-after-write?
+    Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(true);
+    let lock_file = cx.dst.join(".lock");
+    // Write shared runs within a flock; disable thread dispatching of IO temporarily.
+    let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
+
+    if let Some(parts_out_dir) = &opt.parts_out_dir {
         sources.write(cx, parts_out_dir)?;
         search_index.write(cx, parts_out_dir)?;
         all_crates.write(cx, parts_out_dir)?;
@@ -89,34 +88,29 @@ pub(crate) fn write_shared(
         type_aliases.write(cx, parts_out_dir)?;
     }
 
-    if options.write_rendered_cci {
-        write_static_files(cx, &options)?;
+    if opt.write_rendered_cci {
+        write_static_files(cx, &opt)?;
         write_search_desc(cx, &krate, &serialized_search_index)?;
-        let parts_paths  = &options.parts_paths;
-        let read_rendered_cci = options.read_rendered_cci;
-
-        if options.emit.is_empty() || options.emit.contains(&EmitType::InvocationSpecific) {
+        if opt.emit.is_empty() || opt.emit.contains(&EmitType::InvocationSpecific) {
             if cx.include_sources {
-                write_rendered_cci::<SourcesPart>(cx, read_rendered_cci, &parts_paths, &sources)?;
+                write_rendered_cci(cx, opt.read_rendered_cci, &opt.parts_paths, &sources)?;
             }
-            write_rendered_cci::<SearchIndexPart>(cx, read_rendered_cci, &parts_paths, &search_index)?;
-            write_rendered_cci::<AllCratesPart>(cx, read_rendered_cci, &parts_paths, &all_crates)?;
+            write_rendered_cci(cx, opt.read_rendered_cci, &opt.parts_paths, &search_index)?;
+            write_rendered_cci(cx, opt.read_rendered_cci, &opt.parts_paths, &all_crates)?;
         }
-        write_rendered_cci::<TraitAliasPart>(cx, read_rendered_cci, &parts_paths, &trait_aliases)?;
-        write_rendered_cci::<TypeAliasPart>(cx, read_rendered_cci, &parts_paths, &type_aliases)?;
-        if options.enable_index_page {
-            match &options.index_page {
-                Some(index_page) => {
-                    let mut md_opts = options.clone();
-                    md_opts.output = cx.dst.clone();
-                    md_opts.external_html = cx.shared.layout.external_html.clone();
-                    crate::markdown::render(&index_page, md_opts, cx.shared.edition())
-                        .map_err(|e| Error::new(e, &index_page))?;
-                }
-                None => {
-                    write_rendered_cci::<CratesIndexPart>(cx, read_rendered_cci, &parts_paths, &crates_index)?;
-                }
+        write_rendered_cci(cx, opt.read_rendered_cci, &opt.parts_paths, &trait_aliases)?;
+        write_rendered_cci(cx, opt.read_rendered_cci, &opt.parts_paths, &type_aliases)?;
+        match &opt.index_page {
+            Some(index_page) if opt.enable_index_page => {
+                let mut md_opts = opt.clone();
+                md_opts.output = cx.dst.clone();
+                md_opts.external_html = cx.shared.layout.external_html.clone();
+                try_err!(crate::markdown::render(&index_page, md_opts, cx.shared.edition()), &index_page);
             }
+            None if opt.enable_index_page => {
+                write_rendered_cci(cx, opt.read_rendered_cci, &opt.parts_paths, &crates_index)?;
+            }
+            _ => {}, // they don't want an index page
         }
     }
 
@@ -260,7 +254,7 @@ impl NamedPart for SearchIndexPart {
     const NAME: &'static str = "search-index-js";
     type FileFormat = offset_template::Js;
     fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after("var searchIndex = new Map([", "]);
+        OffsetTemplate::before_after(r"var searchIndex = new Map([", r"]);
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);")
     }
@@ -283,9 +277,9 @@ impl NamedPart for AllCratesPart {
     }
 }
 impl PartsAndLocations<AllCratesPart> {
-    fn get(crate_name_json: &SortedJson) -> Result<Self, Error> {
+    fn get(crate_name_json: SortedJson) -> Result<Self, Error> {
         let path = PathBuf::from("crates.js");
-        Ok(Self::with(path, crate_name_json.clone()))
+        Ok(Self::with(path, crate_name_json))
     }
 }
 
@@ -340,11 +334,12 @@ impl NamedPart for SourcesPart {
         // This needs to be `var`, not `const`.
         // This variable needs declared in the current global scope so that if
         // src-script.js loads first, it can pick it up.
-        OffsetTemplate::before_after("var srcIndex = new Map([", "]); createSrcSidebar();")
+        OffsetTemplate::before_after(r"var srcIndex = new Map([", r"]);
+createSrcSidebar();")
     }
 }
 impl PartsAndLocations<SourcesPart> {
-    fn get(cx: &Context<'_>, _krate: &Crate) -> Result<Self, Error> {
+    fn get(cx: &Context<'_>) -> Result<Self, Error> {
         let hierarchy = Rc::new(Hierarchy::default());
         cx
             .shared
@@ -530,7 +525,7 @@ impl PartsAndLocations<TypeAliasPart> {
             ));
 
             let part = SortedJson::array(impls.iter().map(SortedJson::serialize).collect::<Vec<_>>());
-            path_parts.push(path, SortedJson::array_unsorted([crate_name_json.clone(), part]));
+            path_parts.push(path, SortedJson::array_unsorted([crate_name_json, &part]));
         }
         Ok(path_parts)
     }
@@ -616,7 +611,7 @@ impl PartsAndLocations<TraitAliasPart> {
             path.push(&format!("{remote_item_type}.{}.js", remote_path[remote_path.len() - 1]));
 
             let part = SortedJson::array(implementors.iter().map(SortedJson::serialize).collect::<Vec<_>>());
-            path_parts.push(path, SortedJson::array_unsorted([crate_name_json.clone(), part]));
+            path_parts.push(path, SortedJson::array_unsorted([crate_name_json, &part]));
         }
         Ok(path_parts)
     }
@@ -802,6 +797,7 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display>(
     parts_paths: &FxHashMap<String, PathToParts>,
     our_parts_and_locations: &PartsAndLocations<T>,
 ) -> Result<(), Error> {
+    // read parts from disk
     let path_parts = parts_paths.iter()
         .map(|(crate_name, parts_path)| {
             let path = parts_path.cci_path::<T>(crate_name);
@@ -814,11 +810,11 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display>(
         .map(|parts_and_locations| parts_and_locations.parts.iter())
         .flatten()
         .chain(our_parts_and_locations.parts.iter());
+    // read previous cci from storage, append to them
     let mut templates: FxHashMap<PathBuf, OffsetTemplate<T::FileFormat>> = Default::default();
     for (path, part) in path_parts {
         let part = format!("{part}");
-        let path = cx.dst.join(path);
-        match templates.entry(path.clone()) {
+        match templates.entry(cx.dst.join(&path)) {
             Entry::Vacant(entry) => {
                 let template = entry.insert(if read_rendered_cci {
                     match fs::read_to_string(&path) {
@@ -834,6 +830,7 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display>(
             Entry::Occupied(mut t) => try_err!(t.get_mut().append(&part), &path),
         }
     }
+    // write the merged cci to disk
     for (path, template) in templates {
         let file = try_err!(File::create(&path), &path);
         let mut file = BufWriter::new(file);
