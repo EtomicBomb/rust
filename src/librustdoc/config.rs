@@ -506,7 +506,7 @@ impl Options {
             Err(err) => dcx.fatal(err),
         };
 
-        let parts_paths = match parse_fetch_parts(matches) {
+        let parts_paths = match parse_include_info_json(matches) {
             Ok(ex) => ex,
             Err(err) => dcx.fatal(err),
         };
@@ -751,13 +751,11 @@ impl Options {
         let extern_html_root_takes_precedence =
             matches.opt_present("extern-html-root-takes-precedence");
         let html_no_source = matches.opt_present("html-no-source");
-        let Ok(read_rendered_cci) = matches.opt_get_default("read-rendered-cci", true) else {
-            dcx.fatal(format!("read-rendered-cci only accepts true and false"))
+        let MergeResult { read_rendered_cci, write_rendered_cci } = match parse_merge(matches) {
+            Ok(result) => result,
+            Err(e) => dcx.fatal(format!("could not parse --merge: {e}")),
         };
-        let Ok(write_rendered_cci) = matches.opt_get_default("write-rendered-cci", true) else {
-            dcx.fatal(format!("write-rendered-cci only accepts true and false"))
-        };
-        let parts_out_dir = matches.opt_str("parts-out-dir").map(PathBuf::from).map(PathToParts::from_doc_root);
+        let parts_out_dir = matches.opt_str("write-info-json").map(|p| PathToParts::from_doc_root(PathBuf::from(p)));
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -943,17 +941,35 @@ impl PathToParts {
     }
 }
 
-/// Extracts `--fetch-parts` arguments from `matches` and returns a map of crate names to
-/// the given locations. If an `--fetch-parts` argument was ill-formed, returns an error
+/// Extracts `--include-info-json` arguments from `matches` and returns a map of crate names to
+/// the given locations. If an `--include-info-json` argument was ill-formed, returns an error
 /// describing the issue.
-fn parse_fetch_parts(
+fn parse_include_info_json(
     matches: &getopts::Matches,
 ) -> Result<FxHashMap<String, PathToParts>, &'static str> {
     let mut externs = FxHashMap::default();
-    for arg in &matches.opt_strs("fetch-parts") {
+    for arg in &matches.opt_strs("include-info-json") {
         let (name, path) =
-            arg.split_once('=').ok_or("--fetch-parts must be of the form name=path")?;
+            arg.split_once('=').ok_or("--include-info-json must be of the form NAME=PATH")?;
         externs.insert(name.to_string(), PathToParts::from_doc_root(PathBuf::from(path)));
     }
     Ok(externs)
+}
+
+struct MergeResult {
+    read_rendered_cci: bool,
+    write_rendered_cci: bool,
+}
+
+/// Extracts read_rendered_cci and write_rendered_cci from command line arguments, or
+/// reports an error.
+fn parse_merge(matches: &getopts::Matches) -> Result<MergeResult, &'static str> {
+    match matches.opt_str("merge").as_deref() {
+        // default = auto
+        None => Ok(MergeResult { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("auto") => Ok(MergeResult { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("none") => Ok(MergeResult { read_rendered_cci: false, write_rendered_cci: false }),
+        Some("write-only") => Ok(MergeResult { read_rendered_cci: false, write_rendered_cci: true }),
+        Some(_) => Err("argument to --merge must be `auto`, `none`, or `write-only`"),
+    }
 }

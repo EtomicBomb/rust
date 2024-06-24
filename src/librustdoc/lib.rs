@@ -603,32 +603,33 @@ fn opts() -> Vec<RustcOptGroup> {
                 "path to function call information (for displaying examples in the documentation)",
             )
         }),
-        unstable("write-rendered-cci", |o| {
+        unstable("merge", |o| {
             o.optopt(
                 "",
-                "write-rendered-cci",
-                "Writes merged cross-crate information to the doc root. \
-                Defaults to true.",
-                "[true|false]",
+                "merge",
+                "Controls how rustdoc handles files from previously documented crates in the doc root.
+                          auto = append (default)
+                          none = do not write new versions of these files
+                          write-only = overwrite these files without reading previous content",
+                "auto|none|write-only",
             )
         }),
-        unstable("read-rendered-cci", |o| {
-            o.optopt(
-                "",
-                "read-rendered-cci",
-                "Reads partial cross-crate information from the doc root. \
-                Defaults to true.",
-                "[true|false]",
-            )
-        }),
-        unstable("fetch-parts", |o| {
+        unstable("include-info-json", |o| {
             o.optmulti(
                 "",
-                "fetch-parts",
-                "appends cross-crate information fetched from PATH to the output",
-                "NAME=PATH")
+                "include-info-json",
+                "Includes trait implementations and other crate info from PATH/CRATE/crate-info.json",
+                "CRATE=PATH",
+            )
         }),
-        unstable("parts-out-dir", |o| o.optopt("", "parts-out-dir", "which directory to place the cross-crate information doc parts", "PATH")),
+        unstable("write-info-json", |o| {
+            o.optopt(
+                "",
+                "write-info-json",
+                "Writes trait implementations and other info for the current crate to PATH/<crate name>/crate-info.json",
+                "PATH",
+            )
+        }),
         // deprecated / removed options
         unstable("disable-minification", |o| o.optflagmulti("", "disable-minification", "removed")),
         stable("plugin-path", |o| {
