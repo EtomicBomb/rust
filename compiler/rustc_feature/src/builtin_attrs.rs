@@ -1089,6 +1089,14 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         "the `#[custom_mir]` attribute is just used for the Rust test suite",
     ),
     rustc_attr!(
+        TEST, rustc_dump_item_bounds, Normal, template!(Word),
+        WarnFollowing, EncodeCrossCrate::No
+    ),
+    rustc_attr!(
+        TEST, rustc_dump_predicates, Normal, template!(Word),
+        WarnFollowing, EncodeCrossCrate::No
+    ),
+    rustc_attr!(
         TEST, rustc_object_lifetime_default, Normal, template!(Word),
         WarnFollowing, EncodeCrossCrate::No
     ),
@@ -1135,10 +1143,6 @@ pub fn is_valid_for_get_attr(name: Symbol) -> bool {
         | FutureWarnPreceding => true,
         DuplicatesOk | WarnFollowingWordOnly => false,
     })
-}
-
-pub fn is_unsafe_attr(name: Symbol) -> bool {
-    BUILTIN_ATTRIBUTE_MAP.get(&name).is_some_and(|attr| attr.safety == AttributeSafety::Unsafe)
 }
 
 pub static BUILTIN_ATTRIBUTE_MAP: LazyLock<FxHashMap<Symbol, &BuiltinAttribute>> =
