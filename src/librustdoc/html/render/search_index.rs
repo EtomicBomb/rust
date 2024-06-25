@@ -18,6 +18,7 @@ use crate::formats::item_type::ItemType;
 use crate::html::format::join_with_double_colon;
 use crate::html::markdown::short_markdown_summary;
 use crate::html::render::{self, IndexItem, IndexItemFunctionType, RenderType, RenderTypeId};
+use crate::html::render::sorted_json::SortedJson;
 
 use encode::{bitmap_to_string, write_vlqhex_to_string};
 
@@ -47,7 +48,7 @@ use encode::{bitmap_to_string, write_vlqhex_to_string};
 /// [2]: https://en.wikipedia.org/wiki/Sliding_window_protocol#Basic_concept
 /// [3]: https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/description-tcp-features
 pub(crate) struct SerializedSearchIndex {
-    pub(crate) index: String,
+    pub(crate) index: SortedJson,
     pub(crate) desc: Vec<(usize, String)>,
 }
 
@@ -684,24 +685,19 @@ pub(crate) fn build_index<'tcx>(
     // The index, which is actually used to search, is JSON
     // It uses `JSON.parse(..)` to actually load, since JSON
     // parses faster than the full JavaScript syntax.
-    let index = format!(
-        r#"["{}",{}]"#,
-        krate.name(tcx),
-        serde_json::to_string(&CrateData {
-            items: crate_items,
-            paths: crate_paths,
-            aliases: &aliases,
-            associated_item_disambiguators: &associated_item_disambiguators,
-            desc_index,
-            empty_desc,
-        })
-        .expect("failed serde conversion")
-        // All these `replace` calls are because we have to go through JS string for JSON content.
-        .replace('\\', r"\\")
-        .replace('\'', r"\'")
-        // We need to escape double quotes for the JSON.
-        .replace("\\\"", "\\\\\"")
-    );
+    let crate_name = krate.name(tcx);
+    let data = CrateData {
+        items: crate_items,
+        paths: crate_paths,
+        aliases: &aliases,
+        associated_item_disambiguators: &associated_item_disambiguators,
+        desc_index,
+        empty_desc,
+    };
+    let index = SortedJson::array_unsorted([
+        SortedJson::serialize(crate_name.as_str()),
+        SortedJson::serialize(data),
+    ]);
     SerializedSearchIndex { index, desc }
 }
 

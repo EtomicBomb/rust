@@ -23,6 +23,13 @@ impl SortedJson {
         SortedJson(serde_json::to_string(&item).unwrap())
     }
 
+    /// Assumes that `item` is already JSON encoded
+    ///
+    /// TODO: remove this, and use SortedJson everywhere JSON is rendered
+    pub fn preserialized(item: String) -> Self {
+        SortedJson(item)
+    }
+
     /// Serializes and sorts
     pub fn array<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
         let items = items.into_iter()
