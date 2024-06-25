@@ -75,7 +75,7 @@ pub(crate) fn write_shared(
 
     let external_crates = hack_get_external_crate_names(cx)?;
 
-    let sources = PartsAndLocations::<SourcesPart>::get(cx)?;
+    let sources = PartsAndLocations::<SourcesPart>::get(cx, &crate_name_json)?;
     let SerializedSearchIndex { index, desc } = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
     let search_index = PartsAndLocations::<SearchIndexPart>::get(cx, index)?;
     let all_crates = PartsAndLocations::<AllCratesPart>::get(crate_name_json.clone())?;
@@ -372,7 +372,7 @@ createSrcSidebar();")
     }
 }
 impl PartsAndLocations<SourcesPart> {
-    fn get(cx: &Context<'_>) -> Result<Self, Error> {
+    fn get(cx: &Context<'_>, crate_name: &SortedJson) -> Result<Self, Error> {
         let hierarchy = Rc::new(Hierarchy::default());
         cx
             .shared
@@ -381,7 +381,9 @@ impl PartsAndLocations<SourcesPart> {
             .filter_map(|p| p.0.strip_prefix(&cx.shared.src_root).ok())
             .for_each(|source| hierarchy.add_path(source));
         let path = suffix_path("src-files.js", &cx.shared.resource_suffix);
-        Ok(Self::with(path, hierarchy.to_json_string()))
+        let hierarchy = hierarchy.to_json_string();
+        let part = SortedJson::array_unsorted([crate_name, &hierarchy]);
+        Ok(Self::with(path, part))
     }
 }
 
@@ -463,7 +465,7 @@ impl NamedPart for TypeAliasPart {
     } else {
         window.pending_type_impls = type_impls;
     }
-})())")
+})()")
     }
 }
 
@@ -580,7 +582,7 @@ impl NamedPart for TraitAliasPart {
     } else {
         window.pending_implementors = implementors;
     }
-})())")
+})()")
     }
 }
 impl PartsAndLocations<TraitAliasPart> {
@@ -872,7 +874,6 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display + fmt::Debu
     }
     // write the merged cci to disk
     for (path, template) in templates {
-        dbg!(&path, &template, &cx.dst);
         create_parents(cx, &path)?;
         let file = try_err!(File::create(&path), &path);
         let mut file = BufWriter::new(file);
