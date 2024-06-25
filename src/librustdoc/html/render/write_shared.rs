@@ -24,6 +24,7 @@ use std::rc::{Rc, Weak};
 use std::ffi::OsString;
 use std::collections::hash_map::Entry;
 use std::iter::once;
+    use std::str::FromStr;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -71,10 +72,6 @@ pub(crate) fn write_shared(
     let crate_name = krate.name(cx.tcx());
     let crate_name = crate_name.as_str(); // rand
     let crate_name_json = SortedJson::serialize(crate_name); // "rand"
-
-    if crate_name != "foo" {
-        panic!("{crate_name} index{} read{} write{}", opt.enable_index_page, opt.read_rendered_cci, opt.write_rendered_cci);
-    }
 
     let external_crates = hack_get_external_crate_names(cx)?;
 
@@ -302,9 +299,9 @@ fn hack_get_external_crate_names(cx: &Context<'_>) -> Result<Vec<String>, Error>
     let path = cx.dst.join("crates.js");
     let Ok(content) = fs::read_to_string(&path) else {
         // they didn't emit invocation specific, so we just say there were no crates
-        return Ok(Vec::default())
+        return Ok(Vec::default());
     };
-    // this is run only one once so it's fine not to cache it
+    // this is run only run once so it's fine not to cache it
     // dot_matches_new_line false: all crates on same line. greedy: match last bracket
     let regex = Regex::new(r"\[.*\]").unwrap();
     let Some(content) = regex.find(&content) else {
@@ -861,16 +858,16 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display + fmt::Debu
             Entry::Vacant(entry) => {
                 let template = entry.insert(if read_rendered_cci {
                     match fs::read_to_string(&path) {
-                        Ok(template) => try_err!(OffsetTemplate::try_from(template), &path),
+                        Ok(template) => try_err!(OffsetTemplate::from_str(&template), &path),
                         Err(e) if e.kind() == io::ErrorKind::NotFound => T::blank_template(cx),
                         Err(e) => return Err(Error::new(e, &path)),
                     }
                 } else {
                     T::blank_template(cx)
                 });
-                try_err!(template.append(&part), &path)
+                template.append(part);
             }
-            Entry::Occupied(mut t) => try_err!(t.get_mut().append(&part), &path),
+            Entry::Occupied(mut t) => t.get_mut().append(part),
         }
     }
     // write the merged cci to disk

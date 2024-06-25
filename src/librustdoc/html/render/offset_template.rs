@@ -1,22 +1,25 @@
 use std::fmt;
 use std::marker::PhantomData;
+use rustc_data_structures::fx::FxHashSet;
+use std::str::FromStr;
 
 use serde::{Serialize, Deserialize};
 
-/// Append-only templates for lists of items.
+/// Append-only templates for sorted lists of items.
 ///
 /// Last line of the rendered output is a comment encoding the next insertion point.
 #[derive(Debug, Clone)]
 pub(crate) struct OffsetTemplate<F> {
     format: PhantomData<F>,
-    contents: String,
-    offset: Offset,
+    before: String,
+    after: String,
+    contents: FxHashSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Offset {
-    next_insert: usize,
-    empty: bool,
+    start: usize,
+    delta: Vec<usize>,
 }
 
 impl<F> OffsetTemplate<F> {
@@ -34,56 +37,70 @@ impl<F> OffsetTemplate<F> {
     }
 
     /// Template will insert contents between `before` and `after`
-    pub(crate) fn before_after(before: &str, after: &str) -> Self {
-        let contents = format!("{before}{after}");
-        let offset = Offset { next_insert: before.len(), empty: true };
-        Self { format: PhantomData, contents, offset }
+    pub(crate) fn before_after<S: ToString, T: ToString>(before: S, after: T) -> Self {
+        let before = before.to_string();
+        let after = after.to_string();
+        OffsetTemplate { format: PhantomData, before, after, contents: Default::default() }
     }
 }
 
 impl<F: FileFormat> OffsetTemplate<F> {
     /// Puts the text `insert` at the template's insertion point
-    pub(crate) fn append(&mut self, insert: &str) -> Result<(), Error> {
-        if !self.contents.is_char_boundary(self.offset.next_insert) {
-            return Err(Error);
-        }
-        let sep = if self.offset.empty { "" } else { F::SEPARATOR };
-        self.offset.empty = false;
-        let after = self.contents.split_off(self.offset.next_insert);
-        self.contents.push_str(sep);
-        self.contents.push_str(insert);
-        self.contents.push_str(&after);
-        self.offset.next_insert += sep.len() + insert.len();
-        Ok(())
+    pub(crate) fn append(&mut self, insert: String) {
+        self.contents.insert(insert);
     }
 }
 
 impl<F: FileFormat> fmt::Display for OffsetTemplate<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let offset = serde_json::to_string(&self.offset).map_err(|_| fmt::Error)?;
-        write!(f, "{}\n{}{}{}", self.contents, F::COMMENT_START, &offset, F::COMMENT_END)
+        let mut delta = Vec::default();
+        write!(f, "{}", self.before)?;
+        let mut contents: Vec<_> = self.contents.iter().collect();
+        contents.sort_unstable();
+        let mut sep = "";
+        for content in contents {
+            delta.push(sep.len() + content.len());
+            write!(f, "{}{}", sep, content)?;
+            sep = F::SEPARATOR;
+        }
+        let offset = Offset { start: self.before.len(), delta };
+        let offset = serde_json::to_string(&offset).unwrap();
+        write!(f, "{}\n{}{}{}", self.after, F::COMMENT_START, offset, F::COMMENT_END)?;
+        Ok(())
     }
 }
 
-impl<F: FileFormat> TryFrom<String> for OffsetTemplate<F> {
-    type Error = Error;
-    fn try_from(file: String) -> Result<Self, Self::Error> {
-        let newline_index = file.rfind('\n').ok_or(Error)?;
-        let s = &file[newline_index+1..];
-        let s = s.strip_prefix(F::COMMENT_START).ok_or(Error)?;
-        let s = s.strip_suffix(F::COMMENT_END).ok_or(Error)?;
-        let offset = serde_json::from_str(&s).map_err(|_| Error)?;
-        let mut contents = file;
-        contents.truncate(newline_index);
-        Ok(OffsetTemplate { format: PhantomData, contents, offset })
+fn checked_split_at(s: &str, index: usize) -> Option<(&str, &str)> {
+    s.is_char_boundary(index).then(|| s.split_at(index))
+}
+
+impl<F: FileFormat> FromStr for OffsetTemplate<F> {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (s, offset) = s.rsplit_once("\n").ok_or(Error)?;
+        let offset = offset.strip_prefix(F::COMMENT_START).ok_or(Error)?;
+        let offset = offset.strip_suffix(F::COMMENT_END).ok_or(Error)?;
+        let offset: Offset = serde_json::from_str(&offset).map_err(|_| Error)?;
+        let (before, mut s) = checked_split_at(s, offset.start).ok_or(Error)?;
+        let mut contents = Vec::default();
+        let mut sep = "";
+        for &index in offset.delta.iter() {
+            let (content, rest) = checked_split_at(s, index).ok_or(Error)?;
+            s = rest;
+            let content = content.strip_prefix(sep).ok_or(Error)?;
+            contents.push(content);
+            sep = F::SEPARATOR;
+        }
+        Ok(OffsetTemplate {
+            format: PhantomData,
+            before: before.to_string(),
+            after: s.to_string(),
+            contents: contents.into_iter().map(ToString::to_string).collect(),
+        })
     }
 }
 
-mod sealed {
-    pub trait Sealed { }
-}
-
-pub(crate) trait FileFormat: sealed::Sealed {
+pub(crate) trait FileFormat {
     const COMMENT_START: &'static str;
     const COMMENT_END: &'static str;
     const SEPARATOR: &'static str;
@@ -91,9 +108,6 @@ pub(crate) trait FileFormat: sealed::Sealed {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Html;
-
-/// Suitable for HTML documents
-impl sealed::Sealed for Html {}
 
 impl FileFormat for Html {
     const COMMENT_START: &'static str = "<!--";
@@ -103,9 +117,6 @@ impl FileFormat for Html {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Js;
-
-/// Suitable for JS files with JSON arrays
-impl sealed::Sealed for Js {}
 
 impl FileFormat for Js {
     const COMMENT_START: &'static str = "//";
@@ -125,6 +136,7 @@ impl fmt::Display for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn is_comment_js(s: &str) -> bool {
         s.starts_with("//")
@@ -139,7 +151,7 @@ mod tests {
         let inserts = ["<p>hello</p>", "<p>kind</p>", "<p>world</p>"];
         let mut template = OffsetTemplate::<Html>::before_after("", "");
         for insert in inserts {
-            template.append(insert).unwrap();
+            template.append(insert.to_string());
         }
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
@@ -155,7 +167,7 @@ mod tests {
         let after = "</body>";
         let mut template = OffsetTemplate::<Html>::before_after(before, after);
         for insert in inserts {
-            template.append(insert).unwrap();
+            template.append(insert.to_string());
         }
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
@@ -169,7 +181,7 @@ mod tests {
         let inserts = ["1", "2", "3"];
         let mut template = OffsetTemplate::<Js>::before_after("", "");
         for insert in inserts {
-            template.append(insert).unwrap();
+            template.append(insert.to_string());
         }
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
@@ -193,7 +205,7 @@ mod tests {
         let inserts = ["1", "2", "3"];
         let mut template = OffsetTemplate::<Js>::before_after("[", "]");
         for insert in inserts {
-            template.append(insert).unwrap();
+            template.append(insert.to_string());
         }
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
@@ -207,7 +219,7 @@ mod tests {
         let inserts = ["1"];
         let mut template = OffsetTemplate::<Js>::magic("[#]", "#").unwrap();
         for insert in inserts {
-            template.append(insert).unwrap();
+            template.append(insert.to_string());
         }
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
@@ -221,12 +233,12 @@ mod tests {
         let inserts = ["1", "2", "3"];
         let mut template = OffsetTemplate::<Js>::before_after("[", "]");
         for insert in inserts {
-            template.append(insert).unwrap();
+            template.append(insert.to_string());
         }
         let template1 = format!("{template}");
-        let mut template = OffsetTemplate::<Js>::try_from(template1.clone()).unwrap();
+        let mut template = OffsetTemplate::<Js>::from_str(&template1).unwrap();
         assert_eq!(template1, format!("{template}"));
-        template.append("4").unwrap();
+        template.append("4".to_string());
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
         assert_eq!(template, "[1,2,3,4]");
@@ -239,14 +251,35 @@ mod tests {
         let before = "<html><head></head><body>";
         let after = "</body>";
         let mut template = OffsetTemplate::<Html>::before_after(before, after);
-        template.append(inserts[0]).unwrap();
-        template.append(inserts[1]).unwrap();
+        template.append(inserts[0].to_string());
+        template.append(inserts[1].to_string());
         let template = format!("{template}");
-        let mut template = OffsetTemplate::<Html>::try_from(template).unwrap();
-        template.append(inserts[2]).unwrap();
+        let mut template = OffsetTemplate::<Html>::from_str(&template).unwrap();
+        template.append(inserts[2].to_string());
         let template = format!("{template}");
         let (template, end) = template.rsplit_once("\n").unwrap();
         assert_eq!(template, format!("{before}{}{after}", inserts.join("")));
         assert!(is_comment_html(end));
+    }
+
+    #[test]
+    fn blank_js() {
+        let inserts = ["1", "2", "3"];
+        let mut template = OffsetTemplate::<Js>::before_after("", "");
+        let template = format!("{template}");
+        let (t, _) = template.rsplit_once("\n").unwrap();
+        assert_eq!(t, "");
+        let mut template = OffsetTemplate::<Js>::from_str(&template).unwrap();
+        for insert in inserts {
+            template.append(insert.to_string());
+        }
+        let template1 = format!("{template}");
+        let mut template = OffsetTemplate::<Js>::from_str(&template1).unwrap();
+        assert_eq!(template1, format!("{template}"));
+        template.append("4".to_string());
+        let template = format!("{template}");
+        let (template, end) = template.rsplit_once("\n").unwrap();
+        assert_eq!(template, "1,2,3,4");
+        assert!(is_comment_js(end));
     }
 }
