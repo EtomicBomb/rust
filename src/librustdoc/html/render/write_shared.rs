@@ -24,7 +24,7 @@ use std::rc::{Rc, Weak};
 use std::ffi::OsString;
 use std::collections::hash_map::Entry;
 use std::iter::once;
-    use std::str::FromStr;
+use std::str::FromStr;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -69,25 +69,24 @@ pub(crate) fn write_shared(
     opt: &RenderOptions,
     tcx: TyCtxt<'_>,
 ) -> Result<(), Error> {
-    let crate_name = krate.name(cx.tcx());
-    let crate_name = crate_name.as_str(); // rand
-    let crate_name_json = SortedJson::serialize(crate_name); // "rand"
-
-    let external_crates = hack_get_external_crate_names(cx)?;
-
-    let sources = PartsAndLocations::<SourcesPart>::get(cx, &crate_name_json)?;
-    let SerializedSearchIndex { index, desc } = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
-    let search_index = PartsAndLocations::<SearchIndexPart>::get(cx, index)?;
-    let all_crates = PartsAndLocations::<AllCratesPart>::get(crate_name_json.clone())?;
-    let crates_index = PartsAndLocations::<CratesIndexPart>::get(&crate_name, &external_crates)?;
-    let trait_aliases = PartsAndLocations::<TraitAliasPart>::get(cx, &crate_name_json)?;
-    let type_aliases = PartsAndLocations::<TypeAliasPart>::get(cx, krate, &crate_name_json)?;
-
     // NOTE(EtomicBomb): I don't think we need sync here because no read-after-write?
     Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(true);
     let lock_file = cx.dst.join(".lock");
     // Write shared runs within a flock; disable thread dispatching of IO temporarily.
     let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
+
+    let crate_name = krate.name(cx.tcx());
+    let crate_name = crate_name.as_str(); // rand
+    let crate_name_json = SortedJson::serialize(crate_name); // "rand"
+
+    let sources = PartsAndLocations::<SourcesPart>::get(cx, &crate_name_json)?;
+    let SerializedSearchIndex { index, desc } = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
+    let search_index = PartsAndLocations::<SearchIndexPart>::get(cx, index)?;
+    let all_crates = PartsAndLocations::<AllCratesPart>::get(crate_name_json.clone())?;
+    let external_crates = hack_get_external_crate_names(cx)?;
+    let crates_index = PartsAndLocations::<CratesIndexPart>::get(&crate_name, &external_crates)?;
+    let trait_aliases = PartsAndLocations::<TraitAliasPart>::get(cx, &crate_name_json)?;
+    let type_aliases = PartsAndLocations::<TypeAliasPart>::get(cx, krate, &crate_name_json)?;
 
     if let Some(parts_out_dir) = &opt.parts_out_dir {
         sources.write(cx, parts_out_dir)?;
@@ -301,7 +300,7 @@ fn hack_get_external_crate_names(cx: &Context<'_>) -> Result<Vec<String>, Error>
         // they didn't emit invocation specific, so we just say there were no crates
         return Ok(Vec::default());
     };
-    // this is run only run once so it's fine not to cache it
+    // this is only run once so it's fine not to cache it
     // dot_matches_new_line false: all crates on same line. greedy: match last bracket
     let regex = Regex::new(r"\[.*\]").unwrap();
     let Some(content) = regex.find(&content) else {
@@ -572,7 +571,6 @@ struct TraitAlias;
 type TraitAliasPart = Part<TraitAlias, SortedJson>;
 impl NamedPart for TraitAliasPart {
     const NAME: &'static str = "trait-impl";
-
     type FileFormat = offset_template::Js;
     fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
         OffsetTemplate::before_after(r"(function() {
