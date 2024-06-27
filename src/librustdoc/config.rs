@@ -298,7 +298,7 @@ pub(crate) struct RenderOptions {
     pub(crate) write_rendered_cci: bool,
     /// The location of the doc directory for externally located crates.
     /// Absolute path ending in doc/.
-    pub(crate) parts_paths: FxHashMap<String, PathToParts>,
+    pub(crate) parts_paths: Vec<PathToParts>,
     /// Where to write the cross-crate information parts
     pub(crate) parts_out_dir: Option<PathToParts>,
 }
@@ -505,10 +505,9 @@ impl Options {
             Err(err) => dcx.fatal(err),
         };
 
-        let parts_paths = match parse_include_info_json(matches) {
-            Ok(ex) => ex,
-            Err(err) => dcx.fatal(err),
-        };
+        let parts_paths = matches.opt_strs("include-info-json").iter()
+            .map(|path| PathToParts::from_path_to_crate_info(PathBuf::from(path)))
+            .collect();
 
         let default_settings: Vec<Vec<(String, String)>> = vec![
             matches
@@ -754,7 +753,7 @@ impl Options {
             Ok(result) => result,
             Err(e) => dcx.fatal(format!("could not parse --merge: {e}")),
         };
-        let parts_out_dir = matches.opt_str("write-info-json").map(|p| PathToParts::from_doc_root(PathBuf::from(p)));
+        let parts_out_dir = matches.opt_str("write-info-json").map(|p| PathToParts::from_path_to_crate_info(PathBuf::from(p)));
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -924,35 +923,20 @@ fn parse_extern_html_roots(
 
 /// Absolute path to cci root, including doc.parts, but not the crate name
 ///
-/// For example, `/home/user/project/target/doc.parts/`.
+/// For example, `/home/user/project/target/doc.parts/<crate>/crate-info.json`.
 #[derive(Clone, Debug)]
 pub(crate) struct PathToParts(PathBuf);
 
 impl PathToParts {
     /// Absolute path to cci root, including doc.parts, but not the crate name
-    fn from_doc_root(doc_root: PathBuf) -> Self {
+    fn from_path_to_crate_info(doc_root: PathBuf) -> Self {
         PathToParts(doc_root)
     }
 
     /// Gets the final path at which to place the cci part
-    pub(crate) fn crate_info_path(&self, crate_name: &str) -> PathBuf {
-        PathBuf::from_iter([&self.0, Path::new(crate_name), Path::new("crate-info.json")])
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
-}
-
-/// Extracts `--include-info-json` arguments from `matches` and returns a map of crate names to
-/// the given locations. If an `--include-info-json` argument was ill-formed, returns an error
-/// describing the issue.
-fn parse_include_info_json(
-    matches: &getopts::Matches,
-) -> Result<FxHashMap<String, PathToParts>, &'static str> {
-    let mut externs = FxHashMap::default();
-    for arg in &matches.opt_strs("include-info-json") {
-        let (name, path) =
-            arg.split_once('=').ok_or("--include-info-json must be of the form NAME=PATH")?;
-        externs.insert(name.to_string(), PathToParts::from_doc_root(PathBuf::from(path)));
-    }
-    Ok(externs)
 }
 
 struct MergeResult {

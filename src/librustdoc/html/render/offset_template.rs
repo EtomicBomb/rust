@@ -142,6 +142,7 @@ mod tests {
         s.starts_with("//")
     }
 
+    /// not correct, but good enough for these tests
     fn is_comment_html(s: &str) -> bool {
         s.starts_with("<!--") && s.ends_with("-->")
     }

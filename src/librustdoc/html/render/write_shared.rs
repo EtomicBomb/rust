@@ -75,6 +75,7 @@ struct CrateInfo {
 }
 
 impl CrateInfo {
+    /// Gets a reference to the cross-crate information parts for `T`
     fn get<T: 'static>(&self) -> Option<&PartsAndLocations<T>> {
         (&self.src_files_js as &dyn Any).downcast_ref()
             .or_else(|| (&self.search_index_js as &dyn Any).downcast_ref())
@@ -84,17 +85,17 @@ impl CrateInfo {
             .or_else(|| (&self.type_impl as &dyn Any).downcast_ref())
     }
 
-    fn read(parts_paths: &FxHashMap<String, PathToParts>) -> Result<Vec<Self>, Error> {
+    /// read all of the crate info from its location on the filesystem
+    fn read(parts_paths: &[PathToParts]) -> Result<Vec<Self>, Error> {
         parts_paths.iter()
-            .map(|(crate_name, parts_path)| {
-                let path = parts_path.crate_info_path(crate_name);
+            .map(|parts_path| {
+                let path = parts_path.path();
                 let parts = try_err!(fs::read(&path), &path);
                 let parts: CrateInfo = try_err!(serde_json::from_slice(&parts), &path);
                 Ok::<_, Error>(parts)
             })
             .collect::<Result<Vec<CrateInfo>, Error>>()
     }
-
 }
 
 
@@ -125,8 +126,8 @@ pub(crate) fn write_shared(
     };
 
     if let Some(parts_out_dir) = &opt.parts_out_dir {
-        let path = parts_out_dir.crate_info_path(&crate_name);
-        write_create_parents(cx, path, serde_json::to_string(&info).unwrap())?;
+        let path = parts_out_dir.path().to_owned();
+        write_create_parents(cx, dbg!(path), serde_json::to_string(&info).unwrap())?;
     }
 
     let mut crates_info = CrateInfo::read(&opt.parts_paths)?;
