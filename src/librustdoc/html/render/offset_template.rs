@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use serde::{Serialize, Deserialize};
 
-/// Append-only templates for sorted lists of items.
+/// Append-only templates for sorted, deduplicated lists of items.
 ///
 /// Last line of the rendered output is a comment encoding the next insertion point.
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ impl<F> OffsetTemplate<F> {
 }
 
 impl<F: FileFormat> OffsetTemplate<F> {
-    /// Puts the text `insert` at the template's insertion point
+    /// Adds this text to the next insert point
     pub(crate) fn append(&mut self, insert: String) {
         self.contents.insert(insert);
     }

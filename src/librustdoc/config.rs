@@ -25,7 +25,6 @@ use rustc_target::spec::TargetTriple;
 
 use crate::core::new_dcx;
 use crate::externalfiles::ExternalHtml;
-use crate::html::render::NamedPart;
 use crate::html;
 use crate::html::markdown::IdMap;
 use crate::html::render::StylePath;
@@ -923,7 +922,7 @@ fn parse_extern_html_roots(
     Ok(externs)
 }
 
-/// Identifies a crate. Absolute path to cci root, including doc.parts, but not the crate name
+/// Absolute path to cci root, including doc.parts, but not the crate name
 ///
 /// For example, `/home/user/project/target/doc.parts/`.
 #[derive(Clone, Debug)]
@@ -936,8 +935,8 @@ impl PathToParts {
     }
 
     /// Gets the final path at which to place the cci part
-    pub(crate) fn cci_path<T: NamedPart>(&self, crate_name: &str) -> PathBuf {
-        PathBuf::from_iter([&self.0, Path::new(crate_name), Path::new(T::NAME)])
+    pub(crate) fn crate_info_path(&self, crate_name: &str) -> PathBuf {
+        PathBuf::from_iter([&self.0, Path::new(crate_name), Path::new("crate-info.json")])
     }
 }
 
