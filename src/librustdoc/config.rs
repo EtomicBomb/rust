@@ -749,7 +749,7 @@ impl Options {
         let extern_html_root_takes_precedence =
             matches.opt_present("extern-html-root-takes-precedence");
         let html_no_source = matches.opt_present("html-no-source");
-        let MergeResult { read_rendered_cci, write_rendered_cci } = match parse_merge(matches) {
+        let ShouldMerge { read_rendered_cci, write_rendered_cci } = match parse_merge(matches) {
             Ok(result) => result,
             Err(e) => dcx.fatal(format!("could not parse --merge: {e}")),
         };
@@ -939,20 +939,23 @@ impl PathToParts {
     }
 }
 
-struct MergeResult {
+/// Controls merging of cross-crate information
+struct ShouldMerge {
+    /// Should we append to existing cci in the doc root
     read_rendered_cci: bool,
+    /// Should we write cci to the doc root
     write_rendered_cci: bool,
 }
 
 /// Extracts read_rendered_cci and write_rendered_cci from command line arguments, or
 /// reports an error.
-fn parse_merge(matches: &getopts::Matches) -> Result<MergeResult, &'static str> {
+fn parse_merge(matches: &getopts::Matches) -> Result<ShouldMerge, &'static str> {
     match matches.opt_str("merge").as_deref() {
         // default = auto
-        None => Ok(MergeResult { read_rendered_cci: true, write_rendered_cci: true }),
-        Some("auto") => Ok(MergeResult { read_rendered_cci: true, write_rendered_cci: true }),
-        Some("none") => Ok(MergeResult { read_rendered_cci: false, write_rendered_cci: false }),
-        Some("write-only") => Ok(MergeResult { read_rendered_cci: false, write_rendered_cci: true }),
+        None => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("auto") => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("none") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: false }),
+        Some("write-only") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: true }),
         Some(_) => Err("argument to --merge must be `auto`, `none`, or `write-only`"),
     }
 }

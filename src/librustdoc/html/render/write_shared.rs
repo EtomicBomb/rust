@@ -42,7 +42,7 @@ use regex::Regex;
 use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
 use crate::html::render::search_index::build_index;
 use crate::html::render::sorted_json::SortedJson;
-use crate::html::render::offset_template::{self, OffsetTemplate};
+use crate::html::render::sorted_template::{self, SortedTemplate};
 use crate::clean::{Crate, Item, ItemId, ItemKind};
 use crate::config::{EmitType, RenderOptions, PathToParts};
 use crate::docfs::PathError;
@@ -252,8 +252,8 @@ pub(crate) trait NamedPart: Sized {
     /// Identifies the kind of cross crate information.
     ///
     /// The cci type name in `doc.parts/<cci type>`
-    type FileFormat: offset_template::FileFormat;
-    fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat>;
+    type FileFormat: sorted_template::FileFormat;
+    fn blank_template(cx: &Context<'_>) -> SortedTemplate<Self::FileFormat>;
 }
 
 /// Paths (relative to the doc root) and their pre-merge contents
@@ -285,9 +285,9 @@ impl<T, U> PartsAndLocations<Part<T, U>> {
 struct SearchIndex;
 type SearchIndexPart = Part<SearchIndex, SortedJson>;
 impl NamedPart for SearchIndexPart {
-    type FileFormat = offset_template::Js;
-    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after(r"var searchIndex = new Map([", r"]);
+    type FileFormat = sorted_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> SortedTemplate<Self::FileFormat> {
+        SortedTemplate::before_after(r"var searchIndex = new Map([", r"]);
 if (typeof exports !== 'undefined') exports.searchIndex = searchIndex;
 else if (window.initSearch) window.initSearch(searchIndex);")
     }
@@ -303,9 +303,9 @@ impl PartsAndLocations<SearchIndexPart> {
 struct AllCrates;
 type AllCratesPart = Part<AllCrates, SortedJson>;
 impl NamedPart for AllCratesPart {
-    type FileFormat = offset_template::Js;
-    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after("window.ALL_CRATES = [", "];")
+    type FileFormat = sorted_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> SortedTemplate<Self::FileFormat> {
+        SortedTemplate::before_after("window.ALL_CRATES = [", "];")
     }
 }
 impl PartsAndLocations<AllCratesPart> {
@@ -337,8 +337,8 @@ fn hack_get_external_crate_names(cx: &Context<'_>) -> Result<Vec<String>, Error>
 struct CratesIndex;
 type CratesIndexPart = Part<CratesIndex, String>;
 impl NamedPart for CratesIndexPart {
-    type FileFormat = offset_template::Html;
-    fn blank_template(cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+    type FileFormat = sorted_template::Html;
+    fn blank_template(cx: &Context<'_>) -> SortedTemplate<Self::FileFormat> {
         let mut magic = String::from("\u{FFFC}");
         let page = layout::Page {
             title: "Index of crates",
@@ -355,7 +355,7 @@ impl NamedPart for CratesIndexPart {
         loop {
             let content = format!("<h1>List of all crates</h1><ul class=\"all-items\">{magic}</ul>");
             let template = layout::render(layout, &page, "", content, &style_files);
-            match OffsetTemplate::magic(&template, &magic) {
+            match SortedTemplate::magic(&template, &magic) {
                 Ok(template) => return template,
                 Err(_) => magic.push_str("\u{FFFC}"),
             }
@@ -382,12 +382,12 @@ impl PartsAndLocations<CratesIndexPart> {
 struct Sources;
 type SourcesPart = Part<Sources, SortedJson>;
 impl NamedPart for SourcesPart {
-    type FileFormat = offset_template::Js;
-    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
+    type FileFormat = sorted_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> SortedTemplate<Self::FileFormat> {
         // This needs to be `var`, not `const`.
         // This variable needs declared in the current global scope so that if
         // src-script.js loads first, it can pick it up.
-        OffsetTemplate::before_after(r"var srcIndex = new Map([", r"]);
+        SortedTemplate::before_after(r"var srcIndex = new Map([", r"]);
 createSrcSidebar();")
     }
 }
@@ -475,9 +475,9 @@ impl Hierarchy {
 struct TypeAlias;
 type TypeAliasPart = Part<TypeAlias, SortedJson>;
 impl NamedPart for TypeAliasPart {
-    type FileFormat = offset_template::Js;
-    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after(r"(function() {
+    type FileFormat = sorted_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> SortedTemplate<Self::FileFormat> {
+        SortedTemplate::before_after(r"(function() {
     var type_impls = Object.fromEntries([", r"]);
     if (window.register_type_impls) {
         window.register_type_impls(type_impls);
@@ -590,9 +590,9 @@ impl PartsAndLocations<TypeAliasPart> {
 struct TraitAlias;
 type TraitAliasPart = Part<TraitAlias, SortedJson>;
 impl NamedPart for TraitAliasPart {
-    type FileFormat = offset_template::Js;
-    fn blank_template(_cx: &Context<'_>) -> OffsetTemplate<Self::FileFormat> {
-        OffsetTemplate::before_after(r"(function() {
+    type FileFormat = sorted_template::Js;
+    fn blank_template(_cx: &Context<'_>) -> SortedTemplate<Self::FileFormat> {
+        SortedTemplate::before_after(r"(function() {
     var implementors = Object.fromEntries([", r"]);
     if (window.register_implementors) {
         window.register_implementors(implementors);
@@ -860,7 +860,7 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display + fmt::Debu
         .map(|crate_info| crate_info.get::<T>().unwrap().parts.iter())
         .flatten();
     // read previous rendered cci from storage, append to them
-    let mut templates: FxHashMap<PathBuf, OffsetTemplate<T::FileFormat>> = Default::default();
+    let mut templates: FxHashMap<PathBuf, SortedTemplate<T::FileFormat>> = Default::default();
     for (path, part) in path_parts {
         let part = format!("{part}");
         let path = cx.dst.join(&path);
@@ -868,7 +868,7 @@ fn write_rendered_cci<T: NamedPart + DeserializeOwned + fmt::Display + fmt::Debu
             Entry::Vacant(entry) => {
                 let template = entry.insert(if read_rendered_cci {
                     match fs::read_to_string(&path) {
-                        Ok(template) => try_err!(OffsetTemplate::from_str(&template), &path),
+                        Ok(template) => try_err!(SortedTemplate::from_str(&template), &path),
                         Err(e) if e.kind() == io::ErrorKind::NotFound => T::blank_template(cx),
                         Err(e) => return Err(Error::new(e, &path)),
                     }
