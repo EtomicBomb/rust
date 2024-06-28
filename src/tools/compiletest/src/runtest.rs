@@ -1591,7 +1591,18 @@ impl<'test> TestCx<'test> {
         self.compose_and_run_compiler(rustc, None)
     }
 
-    fn document(&self, out_dir: &Path) -> ProcRes {
+    /// aux: whether we are building the aux docs or main docs
+    fn document(&self, out_dir: &Path, info_json: Option<&Path>) -> ProcRes {
+        /// Path to give to --include-info-json and --write-info-json
+        fn info_path(cx: &TestCx<'_>, rel_ab: &str) -> PathBuf {
+            cx.output_base_dir().parent().unwrap().parent().unwrap()
+                .join("doc.parts")
+                .join(rel_ab.trim_end_matches(".rs").replace("-", "_"))
+                .join("crate-info.json")
+        }
+
+        let mut include_flags = Vec::default();
+
         if self.props.build_aux_docs {
             for rel_ab in &self.props.aux_builds {
                 let aux_testpaths = self.compute_aux_test_paths(&self.testpaths, rel_ab);
@@ -1603,9 +1614,11 @@ impl<'test> TestCx<'test> {
                     testpaths: &aux_testpaths,
                     revision: self.revision,
                 };
+                let info_json = info_path(&aux_cx, rel_ab);
+                include_flags.push(format!("--include-info-json={}", info_json.display()));
                 // Create the directory for the stdout/stderr files.
                 create_dir_all(aux_cx.output_base_dir()).unwrap();
-                let auxres = aux_cx.document(out_dir);
+                let auxres = aux_cx.document(out_dir, Some(&info_json));
                 if !auxres.status.success() {
                     return auxres;
                 }
@@ -1615,8 +1628,8 @@ impl<'test> TestCx<'test> {
         let aux_dir = self.aux_output_dir_name();
 
         let rustdoc_path = self.config.rustdoc_path.as_ref().expect("--rustdoc-path not passed");
-        let mut rustdoc = Command::new(rustdoc_path);
 
+        let mut rustdoc = Command::new(rustdoc_path);
         rustdoc
             .arg("-L")
             .arg(self.config.run_lib_path.to_str().unwrap())
@@ -1630,6 +1643,23 @@ impl<'test> TestCx<'test> {
             .arg("-A")
             .arg("internal_features")
             .args(&self.props.compile_flags);
+
+        if self.config.aux_write_doc_cci {
+            match info_json {
+                Some(info_json) => {
+                    rustdoc
+                        .arg("-Zunstable-options")
+                        .arg("--merge=none")
+                        .arg(format!("--write-info-json={}", info_json.display()));
+                }
+                None => {
+                    rustdoc
+                        .arg("-Zunstable-options")
+                        .arg("--merge=write-only")
+                        .args(&include_flags);
+                }
+            }
+        }
 
         if self.config.mode == RustdocJson {
             rustdoc.arg("--output-format").arg("json").arg("-Zunstable-options");
@@ -2673,7 +2703,7 @@ impl<'test> TestCx<'test> {
         let out_dir = self.output_base_dir();
         remove_and_create_dir_all(&out_dir);
 
-        let proc_res = self.document(&out_dir);
+        let proc_res = self.document(&out_dir, None);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
@@ -2732,7 +2762,7 @@ impl<'test> TestCx<'test> {
         let aux_dir = new_rustdoc.aux_output_dir();
         new_rustdoc.build_all_auxiliary(&new_rustdoc.testpaths, &aux_dir, &mut rustc);
 
-        let proc_res = new_rustdoc.document(&compare_dir);
+        let proc_res = new_rustdoc.document(&compare_dir, None);
         if !proc_res.status.success() {
             eprintln!("failed to run nightly rustdoc");
             return;
@@ -2855,7 +2885,7 @@ impl<'test> TestCx<'test> {
         let out_dir = self.output_base_dir();
         remove_and_create_dir_all(&out_dir);
 
-        let proc_res = self.document(&out_dir);
+        let proc_res = self.document(&out_dir, None);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
@@ -3697,7 +3727,7 @@ impl<'test> TestCx<'test> {
         if let Some(nodejs) = &self.config.nodejs {
             let out_dir = self.output_base_dir();
 
-            self.document(&out_dir);
+            self.document(&out_dir, None);
 
             let root = self.config.find_rust_src_root().unwrap();
             let file_stem =

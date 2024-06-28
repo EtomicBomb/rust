@@ -187,6 +187,10 @@ pub struct Config {
     /// The rustdoc executable.
     pub rustdoc_path: Option<PathBuf>,
 
+    /// for rustdoc: whether to write intermediate cross-crate information to crate root
+    /// for auxiliary crates
+    pub aux_write_doc_cci: bool,
+
     /// The coverage-dump executable.
     pub coverage_dump_path: Option<PathBuf>,
 
