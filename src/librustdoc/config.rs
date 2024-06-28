@@ -506,7 +506,7 @@ impl Options {
         };
 
         let parts_paths = matches.opt_strs("include-info-json").iter()
-            .map(|path| PathToParts::from_path_to_crate_info(PathBuf::from(path)))
+            .map(|path| PathToParts(PathBuf::from(path)))
             .collect();
 
         let default_settings: Vec<Vec<(String, String)>> = vec![
@@ -753,7 +753,7 @@ impl Options {
             Ok(result) => result,
             Err(e) => dcx.fatal(format!("could not parse --merge: {e}")),
         };
-        let parts_out_dir = matches.opt_str("write-info-json").map(|p| PathToParts::from_path_to_crate_info(PathBuf::from(p)));
+        let parts_out_dir = matches.opt_str("write-info-json").map(|p| PathToParts(PathBuf::from(p)));
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -921,23 +921,11 @@ fn parse_extern_html_roots(
     Ok(externs)
 }
 
-/// Absolute path to cci root, including doc.parts, but not the crate name
+/// Path to cci root, including doc.parts, but not the crate name
 ///
 /// For example, `/home/user/project/target/doc.parts/<crate>/crate-info.json`.
 #[derive(Clone, Debug)]
-pub(crate) struct PathToParts(PathBuf);
-
-impl PathToParts {
-    /// Absolute path to cci root, including doc.parts, but not the crate name
-    fn from_path_to_crate_info(doc_root: PathBuf) -> Self {
-        PathToParts(doc_root)
-    }
-
-    /// Gets the final path at which to place the cci part
-    pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
-}
+pub(crate) struct PathToParts(pub(crate) PathBuf);
 
 /// Controls merging of cross-crate information
 struct ShouldMerge {
