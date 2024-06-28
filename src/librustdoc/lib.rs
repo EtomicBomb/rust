@@ -618,15 +618,15 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optmulti(
                 "",
                 "include-info-json",
-                "Includes trait implementations and other crate info from PATH/CRATE/crate-info.json",
-                "CRATE=PATH",
+                "Includes trait implementations and other crate info from PATH",
+                "PATH",
             )
         }),
         unstable("write-info-json", |o| {
             o.optopt(
                 "",
                 "write-info-json",
-                "Writes trait implementations and other info for the current crate to PATH/<crate name>/crate-info.json",
+                "Writes trait implementations and other info for the current crate to PATH",
                 "PATH",
             )
         }),
