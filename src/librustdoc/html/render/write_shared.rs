@@ -73,10 +73,12 @@ pub(crate) fn write_shared(
     // Write shared runs within a flock; disable thread dispatching of IO temporarily.
     let _lock = try_err!(flock::Lock::new(&lock_file, true, true, true), &lock_file);
 
+    let SerializedSearchIndex { index, desc } = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
+    write_search_desc(cx, &krate, &desc)?; // does not need to be merged; written unconditionally
+
     let crate_name = krate.name(cx.tcx());
     let crate_name = crate_name.as_str(); // rand
     let crate_name_json = SortedJson::serialize(crate_name); // "rand"
-    let SerializedSearchIndex { index, desc } = build_index(&krate, &mut Rc::get_mut(&mut cx.shared).unwrap().cache, tcx);
     let external_crates = hack_get_external_crate_names(cx)?;
     let info = CrateInfo {
         src_files_js: PartsAndLocations::<SourcesPart>::get(cx, &crate_name_json)?,
@@ -89,7 +91,7 @@ pub(crate) fn write_shared(
 
     if let Some(parts_out_dir) = &opt.parts_out_dir {
         let path = parts_out_dir.0.clone();
-        write_create_parents(cx, dbg!(path), serde_json::to_string(&info).unwrap())?;
+        write_create_parents(cx, path, serde_json::to_string(&info).unwrap())?;
     }
 
     let mut crates_info = CrateInfo::read(&opt.parts_paths)?;
@@ -97,7 +99,6 @@ pub(crate) fn write_shared(
 
     if opt.write_rendered_cci {
         write_static_files(cx, &opt)?;
-        write_search_desc(cx, &krate, &desc)?;
         if opt.emit.is_empty() || opt.emit.contains(&EmitType::InvocationSpecific) {
             if cx.include_sources {
                 write_rendered_cci::<SourcesPart>(cx, opt.read_rendered_cci, &crates_info)?;
