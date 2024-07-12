@@ -67,12 +67,6 @@ pub struct BuiltinWhileTrue {
 }
 
 #[derive(LintDiagnostic)]
-#[diag(lint_builtin_box_pointers)]
-pub struct BuiltinBoxPointers<'a> {
-    pub ty: Ty<'a>,
-}
-
-#[derive(LintDiagnostic)]
 #[diag(lint_builtin_non_shorthand_field_patterns)]
 pub struct BuiltinNonShorthandFieldPatterns {
     pub ident: Ident,
@@ -321,6 +315,13 @@ pub struct BuiltinTypeAliasGenericBounds<'a, 'b> {
     pub suggestion: BuiltinTypeAliasGenericBoundsSuggestion,
     #[subdiagnostic]
     pub sub: Option<SuggestChangingAssocTypes<'a, 'b>>,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_macro_expr_fragment_specifier_2024_migration)]
+pub struct MacroExprFragment2024 {
+    #[suggestion(code = "expr_2021", applicability = "machine-applicable")]
+    pub suggestion: Span,
 }
 
 pub struct BuiltinTypeAliasGenericBoundsSuggestion {
@@ -2910,4 +2911,11 @@ pub struct UnsafeAttrOutsideUnsafeSuggestion {
     pub left: Span,
     #[suggestion_part(code = ")")]
     pub right: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_out_of_scope_macro_calls)]
+#[help]
+pub struct OutOfScopeMacroCalls {
+    pub path: String,
 }

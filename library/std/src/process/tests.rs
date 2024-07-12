@@ -137,7 +137,7 @@ fn child_stdout_read_buf() {
     let child = cmd.spawn().unwrap();
 
     let mut stdout = child.stdout.unwrap();
-    let mut buf: [MaybeUninit<u8>; 128] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; 128] = [MaybeUninit::uninit(); 128];
     let mut buf = BorrowedBuf::from(buf.as_mut_slice());
     stdout.read_buf(buf.unfilled()).unwrap();
 
@@ -386,7 +386,7 @@ fn test_interior_nul_in_env_value_is_error() {
 fn test_creation_flags() {
     use crate::os::windows::process::CommandExt;
     use crate::sys::c::{BOOL, DWORD, INFINITE};
-    #[repr(C, packed)]
+    #[repr(C)]
     struct DEBUG_EVENT {
         pub event_code: DWORD,
         pub process_id: DWORD,

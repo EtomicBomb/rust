@@ -127,9 +127,9 @@ fn fn_sig_for_fn_abi<'tcx>(
                     coroutine_kind = ty::ClosureKind::FnOnce;
 
                     // Implementations of `FnMut` and `Fn` for coroutine-closures
-                    // still take their receiver by (mut) ref.
+                    // still take their receiver by ref.
                     if receiver_by_ref {
-                        Ty::new_mut_ref(tcx, tcx.lifetimes.re_erased, coroutine_ty)
+                        Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, coroutine_ty)
                     } else {
                         coroutine_ty
                     }
@@ -324,7 +324,7 @@ fn fn_sig_for_fn_abi<'tcx>(
 #[inline]
 fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi, c_variadic: bool) -> Conv {
     use rustc_target::spec::abi::Abi::*;
-    match tcx.sess.target.adjust_abi(&tcx, abi, c_variadic) {
+    match tcx.sess.target.adjust_abi(abi, c_variadic) {
         RustIntrinsic | Rust | RustCall => Conv::Rust,
 
         // This is intentionally not using `Conv::Cold`, as that has to preserve
@@ -352,7 +352,6 @@ fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi, c_variadic: bool) -> Conv {
         AvrNonBlockingInterrupt => Conv::AvrNonBlockingInterrupt,
         RiscvInterruptM => Conv::RiscvInterrupt { kind: RiscvInterruptKind::Machine },
         RiscvInterruptS => Conv::RiscvInterrupt { kind: RiscvInterruptKind::Supervisor },
-        Wasm => Conv::C,
 
         // These API constants ought to be more specific...
         Cdecl { .. } => Conv::C,

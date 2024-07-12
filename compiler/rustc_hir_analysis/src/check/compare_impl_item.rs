@@ -21,8 +21,9 @@ use rustc_middle::ty::{
 use rustc_middle::ty::{GenericParamDefKind, TyCtxt};
 use rustc_middle::{bug, span_bug};
 use rustc_span::Span;
+use rustc_trait_selection::error_reporting::traits::TypeErrCtxtExt;
+use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::regions::InferCtxtRegionExt;
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt;
 use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
 use rustc_trait_selection::traits::{
     self, FulfillmentError, ObligationCause, ObligationCauseCode, ObligationCtxt, Reveal,
@@ -981,7 +982,7 @@ fn report_trait_method_mismatch<'tcx>(
                 .next()
                 .unwrap_or(impl_err_span);
 
-            diag.span_suggestion(
+            diag.span_suggestion_verbose(
                 span,
                 "change the self-receiver type to match the trait",
                 sugg,
@@ -1005,12 +1006,12 @@ fn report_trait_method_mismatch<'tcx>(
                         }
                         hir::FnRetTy::Return(hir_ty) => {
                             let sugg = trait_sig.output();
-                            diag.span_suggestion(hir_ty.span, msg, sugg, ap);
+                            diag.span_suggestion_verbose(hir_ty.span, msg, sugg, ap);
                         }
                     };
                 };
             } else if let Some(trait_ty) = trait_sig.inputs().get(*i) {
-                diag.span_suggestion(
+                diag.span_suggestion_verbose(
                     impl_err_span,
                     "change the parameter type to match the trait",
                     trait_ty,
@@ -1985,10 +1986,10 @@ pub(super) fn check_type_bounds<'tcx>(
     let infcx = tcx.infer_ctxt().build();
     let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
 
-    // A synthetic impl Trait for RPITIT desugaring has no HIR, which we currently use to get the
-    // span for an impl's associated type. Instead, for these, use the def_span for the synthesized
-    // associated type.
-    let impl_ty_span = if impl_ty.is_impl_trait_in_trait() {
+    // A synthetic impl Trait for RPITIT desugaring or assoc type for effects desugaring has no HIR,
+    // which we currently use to get the span for an impl's associated type. Instead, for these,
+    // use the def_span for the synthesized  associated type.
+    let impl_ty_span = if impl_ty.is_impl_trait_in_trait() || impl_ty.is_effects_desugaring {
         tcx.def_span(impl_ty_def_id)
     } else {
         match tcx.hir_node_by_def_id(impl_ty_def_id) {
@@ -2032,7 +2033,7 @@ pub(super) fn check_type_bounds<'tcx>(
     // to its definition type. This should be the param-env we use to *prove* the
     // predicate too, but we don't do that because of performance issues.
     // See <https://github.com/rust-lang/rust/pull/117542#issue-1976337685>.
-    let trait_projection_ty = Ty::new_projection(tcx, trait_ty.def_id, rebased_args);
+    let trait_projection_ty = Ty::new_projection_from_args(tcx, trait_ty.def_id, rebased_args);
     let impl_identity_ty = tcx.type_of(impl_ty.def_id).instantiate_identity();
     let normalize_param_env = param_env_with_gat_bounds(tcx, impl_ty, impl_trait_ref);
     for mut obligation in util::elaborate(tcx, obligations) {
@@ -2230,7 +2231,11 @@ fn param_env_with_gat_bounds<'tcx>(
             _ => predicates.push(
                 ty::Binder::bind_with_vars(
                     ty::ProjectionPredicate {
-                        projection_term: ty::AliasTerm::new(tcx, trait_ty.def_id, rebased_args),
+                        projection_term: ty::AliasTerm::new_from_args(
+                            tcx,
+                            trait_ty.def_id,
+                            rebased_args,
+                        ),
                         term: normalize_impl_ty.into(),
                     },
                     bound_vars,

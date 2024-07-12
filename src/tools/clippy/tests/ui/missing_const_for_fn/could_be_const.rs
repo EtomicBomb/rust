@@ -104,15 +104,18 @@ fn main() {}
 
 struct D;
 
+/* FIXME(effects)
 impl const Drop for D {
     fn drop(&mut self) {
         todo!();
     }
 }
+*/
 
 // Lint this, since it can be dropped in const contexts
 // FIXME(effects)
 fn d(this: D) {}
+//~^ ERROR: this could be a `const fn`
 
 mod msrv {
     struct Foo(*const u8, &'static u8);
@@ -139,6 +142,21 @@ mod msrv {
         //~^ ERROR: this could be a `const fn`
         let bar = Bar { val: 1 };
         let _ = unsafe { bar.val };
+    }
+
+    #[clippy::msrv = "1.62"]
+    mod with_extern {
+        extern "C" fn c() {}
+        //~^ ERROR: this could be a `const fn`
+
+        #[rustfmt::skip]
+        extern fn implicit_c() {}
+        //~^ ERROR: this could be a `const fn`
+
+        // any item functions in extern block won't trigger this lint
+        extern "C" {
+            fn c_in_block();
+        }
     }
 }
 
@@ -170,4 +188,19 @@ mod issue12677 {
             Self { text, vec }
         }
     }
+}
+
+mod with_ty_alias {
+    trait FooTrait {
+        type Foo: std::fmt::Debug;
+        fn bar(_: Self::Foo) {}
+    }
+    impl FooTrait for () {
+        type Foo = i32;
+    }
+    // NOTE: When checking the type of a function param, make sure it is not an alias with
+    // `AliasTyKind::Projection` before calling `TyCtxt::type_of` to find out what the actual type
+    // is. Because the associate ty could have no default, therefore would cause ICE, as demostrated
+    // in this test.
+    fn alias_ty_is_projection(bar: <() as FooTrait>::Foo) {}
 }

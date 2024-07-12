@@ -53,6 +53,7 @@ declare_lint_pass!(ManualUnwrapOrDefault => [MANUAL_UNWRAP_OR_DEFAULT]);
 
 fn get_some<'tcx>(cx: &LateContext<'tcx>, pat: &Pat<'tcx>) -> Option<HirId> {
     if let PatKind::TupleStruct(QPath::Resolved(_, path), &[pat], _) = pat.kind
+        && let PatKind::Binding(_, pat_id, _, _) = pat.kind
         && let Some(def_id) = path.res.opt_def_id()
         // Since it comes from a pattern binding, we need to get the parent to actually match
         // against it.
@@ -60,13 +61,7 @@ fn get_some<'tcx>(cx: &LateContext<'tcx>, pat: &Pat<'tcx>) -> Option<HirId> {
         && (cx.tcx.lang_items().get(LangItem::OptionSome) == Some(def_id)
         || cx.tcx.lang_items().get(LangItem::ResultOk) == Some(def_id))
     {
-        let mut bindings = Vec::new();
-        pat.each_binding(|_, id, _, _| bindings.push(id));
-        if let &[id] = bindings.as_slice() {
-            Some(id)
-        } else {
-            None
-        }
+        Some(pat_id)
     } else {
         None
     }
@@ -177,11 +172,10 @@ fn handle<'tcx>(cx: &LateContext<'tcx>, if_let_or_match: IfLetOrMatch<'tcx>, exp
 
 impl<'tcx> LateLintPass<'tcx> for ManualUnwrapOrDefault {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        if expr.span.from_expansion() || in_constant(cx, expr.hir_id) {
-            return;
-        }
-        // Call handle only if the expression is `if let` or `match`
-        if let Some(if_let_or_match) = IfLetOrMatch::parse(cx, expr) {
+        if let Some(if_let_or_match) = IfLetOrMatch::parse(cx, expr)
+            && !expr.span.from_expansion()
+            && !in_constant(cx, expr.hir_id)
+        {
             handle(cx, if_let_or_match, expr);
         }
     }

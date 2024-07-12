@@ -1,218 +1,227 @@
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:15:1
+  --> $DIR/name-value.rs:11:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL | #[coverage(on|off)]
-   | ~~~~~~~~~~~~~~~~~~~
-LL | #[coverage]
-   | ~~~~~~~~~~~
+LL | #[coverage(off)]
+   |
+LL | #[coverage(on)]
+   |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:19:5
+  --> $DIR/name-value.rs:16:5
    |
 LL |     #![coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL |     #![coverage(on|off)]
-   |     ~~~~~~~~~~~~~~~~~~~~
-LL |     #![coverage]
-   |     ~~~~~~~~~~~~
+LL |     #![coverage(off)]
+   |
+LL |     #![coverage(on)]
+   |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:22:1
+  --> $DIR/name-value.rs:20:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL | #[coverage(on|off)]
+LL | #[coverage(off)]
    |
-LL | #[coverage]
+LL | #[coverage(on)]
    |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:29:5
+  --> $DIR/name-value.rs:28:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL |     #[coverage(on|off)]
+LL |     #[coverage(off)]
    |
-LL |     #[coverage]
+LL |     #[coverage(on)]
    |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:27:1
+  --> $DIR/name-value.rs:25:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL | #[coverage(on|off)]
-   | ~~~~~~~~~~~~~~~~~~~
-LL | #[coverage]
-   | ~~~~~~~~~~~
+LL | #[coverage(off)]
+   |
+LL | #[coverage(on)]
+   |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:37:5
+  --> $DIR/name-value.rs:38:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL |     #[coverage(on|off)]
+LL |     #[coverage(off)]
    |
-LL |     #[coverage]
+LL |     #[coverage(on)]
    |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:42:5
+  --> $DIR/name-value.rs:43:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL |     #[coverage(on|off)]
+LL |     #[coverage(off)]
    |
-LL |     #[coverage]
+LL |     #[coverage(on)]
    |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:35:1
+  --> $DIR/name-value.rs:34:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL | #[coverage(on|off)]
-   | ~~~~~~~~~~~~~~~~~~~
-LL | #[coverage]
-   | ~~~~~~~~~~~
+LL | #[coverage(off)]
+   |
+LL | #[coverage(on)]
+   |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:50:5
+  --> $DIR/name-value.rs:52:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL |     #[coverage(on|off)]
+LL |     #[coverage(off)]
    |
-LL |     #[coverage]
+LL |     #[coverage(on)]
    |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:55:5
+  --> $DIR/name-value.rs:57:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL |     #[coverage(on|off)]
+LL |     #[coverage(off)]
    |
-LL |     #[coverage]
+LL |     #[coverage(on)]
    |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:48:1
+  --> $DIR/name-value.rs:49:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL | #[coverage(on|off)]
-   | ~~~~~~~~~~~~~~~~~~~
-LL | #[coverage]
-   | ~~~~~~~~~~~
+LL | #[coverage(off)]
+   |
+LL | #[coverage(on)]
+   |
 
 error: malformed `coverage` attribute input
-  --> $DIR/name-value.rs:61:1
+  --> $DIR/name-value.rs:63:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
    |
 help: the following are the possible correct uses
    |
-LL | #[coverage(on|off)]
+LL | #[coverage(off)]
    |
-LL | #[coverage]
+LL | #[coverage(on)]
    |
 
-error[E0788]: `#[coverage]` must be applied to coverable code
-  --> $DIR/name-value.rs:22:1
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:20:1
    |
 LL | #[coverage = "off"]
    | ^^^^^^^^^^^^^^^^^^^
 ...
 LL | struct MyStruct;
-   | ---------------- not coverable code
+   | ---------------- not a function or closure
 
-error[E0788]: `#[coverage]` must be applied to coverable code
-  --> $DIR/name-value.rs:37:5
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:34:1
+   |
+LL |   #[coverage = "off"]
+   |   ^^^^^^^^^^^^^^^^^^^
+...
+LL | / trait MyTrait {
+LL | |     #[coverage = "off"]
+LL | |
+LL | |
+...  |
+LL | |     type T;
+LL | | }
+   | |_- not a function or closure
+
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:38:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
 ...
 LL |     const X: u32;
-   |     ------------- not coverable code
+   |     ------------- not a function or closure
 
-error[E0788]: `#[coverage]` must be applied to coverable code
-  --> $DIR/name-value.rs:42:5
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:43:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
 ...
 LL |     type T;
-   |     ------- not coverable code
+   |     ------- not a function or closure
 
-error[E0788]: `#[coverage]` must be applied to coverable code
-  --> $DIR/name-value.rs:29:5
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:28:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
 ...
 LL |     const X: u32 = 7;
-   |     ----------------- not coverable code
+   |     ----------------- not a function or closure
 
-error[E0788]: `#[coverage]` must be applied to coverable code
-  --> $DIR/name-value.rs:50:5
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:52:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
 ...
 LL |     const X: u32 = 8;
-   |     ----------------- not coverable code
+   |     ----------------- not a function or closure
 
-error[E0788]: `#[coverage]` must be applied to coverable code
-  --> $DIR/name-value.rs:55:5
+error[E0788]: attribute should be applied to a function definition or closure
+  --> $DIR/name-value.rs:57:5
    |
 LL |     #[coverage = "off"]
    |     ^^^^^^^^^^^^^^^^^^^
 ...
 LL |     type T = ();
-   |     ------------ not coverable code
-
-error: expected `coverage(off)` or `coverage(on)`
-  --> $DIR/name-value.rs:61:1
-   |
-LL | #[coverage = "off"]
-   | ^^^^^^^^^^^^^^^^^^^
+   |     ------------ not a function or closure
 
 error: aborting due to 19 previous errors
 

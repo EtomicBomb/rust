@@ -103,18 +103,9 @@ passes_continue_labeled_block =
     .label = labeled blocks cannot be `continue`'d
     .block_label = labeled block the `continue` points to
 
-passes_coverage_fn_defn =
-    `#[coverage]` may only be applied to function definitions
-
-passes_coverage_ignored_function_prototype =
-    `#[coverage]` is ignored on function prototypes
-
-passes_coverage_not_coverable =
-    `#[coverage]` must be applied to coverable code
-    .label = not coverable code
-
-passes_coverage_propagate =
-    `#[coverage]` does not propagate into items and must be applied to the contained functions directly
+passes_coverage_not_fn_or_closure =
+    attribute should be applied to a function definition or closure
+    .label = not a function or closure
 
 passes_dead_codes =
     { $multiple ->
@@ -791,6 +782,7 @@ passes_used_compiler_linker =
 
 passes_used_static =
     attribute must be applied to a `static` variable
+    .label = but this is a {$target}
 
 passes_useless_assignment =
     useless assignment of {$is_field_assign ->

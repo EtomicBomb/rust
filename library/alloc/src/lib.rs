@@ -124,10 +124,10 @@
 #![feature(error_generic_member_access)]
 #![feature(exact_size_is_empty)]
 #![feature(extend_one)]
+#![feature(extend_one_unchecked)]
 #![feature(fmt_internals)]
 #![feature(fn_traits)]
 #![feature(hasher_prefixfree_extras)]
-#![feature(hint_assert_unchecked)]
 #![feature(inplace_iteration)]
 #![feature(iter_advance_by)]
 #![feature(iter_next_chunk)]
@@ -135,7 +135,6 @@
 #![feature(layout_for_ptr)]
 #![feature(local_waker)]
 #![feature(maybe_uninit_slice)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(panic_internals)]
 #![feature(pattern)]
@@ -258,6 +257,7 @@ pub mod vec;
 #[unstable(feature = "liballoc_internals", issue = "none", reason = "implementation detail")]
 pub mod __export {
     pub use core::format_args;
+    pub use core::hint::must_use;
 }
 
 #[cfg(test)]

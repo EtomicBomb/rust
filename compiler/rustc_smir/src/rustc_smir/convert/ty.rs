@@ -304,10 +304,10 @@ impl<'tcx> Stable<'tcx> for ty::FloatTy {
 
     fn stable(&self, _: &mut Tables<'_>) -> Self::T {
         match self {
-            ty::FloatTy::F16 => unimplemented!("f16_f128"),
+            ty::FloatTy::F16 => FloatTy::F16,
             ty::FloatTy::F32 => FloatTy::F32,
             ty::FloatTy::F64 => FloatTy::F64,
-            ty::FloatTy::F128 => unimplemented!("f16_f128"),
+            ty::FloatTy::F128 => FloatTy::F128,
         }
     }
 }
@@ -600,7 +600,7 @@ impl<'tcx> Stable<'tcx> for rustc_middle::ty::GenericParamDefKind {
             ty::GenericParamDefKind::Type { has_default, synthetic } => {
                 GenericParamDefKind::Type { has_default: *has_default, synthetic: *synthetic }
             }
-            ty::GenericParamDefKind::Const { has_default, is_host_effect: _ } => {
+            ty::GenericParamDefKind::Const { has_default, is_host_effect: _, synthetic: _ } => {
                 GenericParamDefKind::Const { has_default: *has_default }
             }
         }
@@ -909,7 +909,6 @@ impl<'tcx> Stable<'tcx> for rustc_target::spec::abi::Abi {
             abi::Abi::AvrInterrupt => Abi::AvrInterrupt,
             abi::Abi::AvrNonBlockingInterrupt => Abi::AvrNonBlockingInterrupt,
             abi::Abi::CCmseNonSecureCall => Abi::CCmseNonSecureCall,
-            abi::Abi::Wasm => Abi::Wasm,
             abi::Abi::System { unwind } => Abi::System { unwind },
             abi::Abi::RustIntrinsic => Abi::RustIntrinsic,
             abi::Abi::RustCall => Abi::RustCall,

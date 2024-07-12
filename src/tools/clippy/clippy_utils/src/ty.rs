@@ -96,11 +96,7 @@ pub fn contains_ty_adt_constructor_opaque<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'
                         return false;
                     }
 
-                    for (predicate, _span) in cx
-                        .tcx
-                        .explicit_item_super_predicates(def_id)
-                        .instantiate_identity_iter_copied()
-                    {
+                    for (predicate, _span) in cx.tcx.explicit_item_super_predicates(def_id).iter_identity_copied() {
                         match predicate.kind().skip_binder() {
                             // For `impl Trait<U>`, it will register a predicate of `T: Trait<U>`, so we go through
                             // and check substitutions to find `U`.
@@ -292,7 +288,7 @@ pub fn implements_trait_with_env_from_iter<'tcx>(
     let trait_ref = TraitRef::new(
         tcx,
         trait_id,
-        Some(GenericArg::from(ty)).into_iter().chain(args).chain(effect_arg),
+        [GenericArg::from(ty)].into_iter().chain(args).chain(effect_arg),
     );
 
     debug_assert_matches!(
@@ -1126,7 +1122,7 @@ pub fn make_projection<'tcx>(
         #[cfg(debug_assertions)]
         assert_generic_args_match(tcx, assoc_item.def_id, args);
 
-        Some(AliasTy::new(tcx, assoc_item.def_id, args))
+        Some(AliasTy::new_from_args(tcx, assoc_item.def_id, args))
     }
     helper(
         tcx,
@@ -1165,7 +1161,7 @@ pub fn make_normalized_projection<'tcx>(
             );
             return None;
         }
-        match tcx.try_normalize_erasing_regions(param_env, Ty::new_projection(tcx, ty.def_id, ty.args)) {
+        match tcx.try_normalize_erasing_regions(param_env, Ty::new_projection_from_args(tcx, ty.def_id, ty.args)) {
             Ok(ty) => Some(ty),
             Err(e) => {
                 debug_assert!(false, "failed to normalize type `{ty}`: {e:#?}");
@@ -1289,7 +1285,7 @@ pub fn make_normalized_projection_with_regions<'tcx>(
             .infer_ctxt()
             .build()
             .at(&cause, param_env)
-            .query_normalize(Ty::new_projection(tcx, ty.def_id, ty.args))
+            .query_normalize(Ty::new_projection_from_args(tcx, ty.def_id, ty.args))
         {
             Ok(ty) => Some(ty.value),
             Err(e) => {
@@ -1332,20 +1328,28 @@ pub fn deref_chain<'cx, 'tcx>(cx: &'cx LateContext<'tcx>, ty: Ty<'tcx>) -> impl 
 /// If you need this, you should wrap this call in `clippy_utils::ty::deref_chain().any(...)`.
 pub fn get_adt_inherent_method<'a>(cx: &'a LateContext<'_>, ty: Ty<'_>, method_name: Symbol) -> Option<&'a AssocItem> {
     if let Some(ty_did) = ty.ty_adt_def().map(AdtDef::did) {
-        cx.tcx
-            .inherent_impls(ty_did)
-            .into_iter()
-            .flatten()
-            .map(|&did| {
-                cx.tcx
-                    .associated_items(did)
-                    .filter_by_name_unhygienic(method_name)
-                    .next()
-                    .filter(|item| item.kind == AssocKind::Fn)
-            })
-            .next()
-            .flatten()
+        cx.tcx.inherent_impls(ty_did).into_iter().flatten().find_map(|&did| {
+            cx.tcx
+                .associated_items(did)
+                .filter_by_name_unhygienic(method_name)
+                .next()
+                .filter(|item| item.kind == AssocKind::Fn)
+        })
     } else {
         None
+    }
+}
+
+/// Get's the type of a field by name.
+pub fn get_field_by_name<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, name: Symbol) -> Option<Ty<'tcx>> {
+    match *ty.kind() {
+        ty::Adt(def, args) if def.is_union() || def.is_struct() => def
+            .non_enum_variant()
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.ty(tcx, args)),
+        ty::Tuple(args) => name.as_str().parse::<usize>().ok().and_then(|i| args.get(i).copied()),
+        _ => None,
     }
 }

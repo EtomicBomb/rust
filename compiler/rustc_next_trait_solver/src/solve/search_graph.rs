@@ -71,7 +71,7 @@ struct StackEntry<I: Interner> {
     /// C :- D
     /// D :- C
     /// ```
-    cycle_participants: HashSet<CanonicalInput<I>>,
+    nested_goals: HashSet<CanonicalInput<I>>,
     /// Starts out as `None` and gets set when rerunning this
     /// goal in case we encounter a cycle.
     provisional_result: Option<QueryResult<I>>,
@@ -139,18 +139,11 @@ impl<I: Interner> SearchGraph<I> {
         self.mode
     }
 
-    /// Pops the highest goal from the stack, lazily updating the
-    /// the next goal in the stack.
-    ///
-    /// Directly popping from the stack instead of using this method
-    /// would cause us to not track overflow and recursion depth correctly.
-    fn pop_stack(&mut self) -> StackEntry<I> {
-        let elem = self.stack.pop().unwrap();
-        if let Some(last) = self.stack.raw.last_mut() {
-            last.reached_depth = last.reached_depth.max(elem.reached_depth);
-            last.encountered_overflow |= elem.encountered_overflow;
+    fn update_parent_goal(&mut self, reached_depth: StackDepth, encountered_overflow: bool) {
+        if let Some(parent) = self.stack.raw.last_mut() {
+            parent.reached_depth = parent.reached_depth.max(reached_depth);
+            parent.encountered_overflow |= encountered_overflow;
         }
-        elem
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -164,7 +157,7 @@ impl<I: Interner> SearchGraph<I> {
     /// the remaining depth of all nested goals to prevent hangs
     /// in case there is exponential blowup.
     fn allowed_depth_for_nested(
-        tcx: I,
+        cx: I,
         stack: &IndexVec<StackDepth, StackEntry<I>>,
     ) -> Option<SolverLimit> {
         if let Some(last) = stack.raw.last() {
@@ -178,18 +171,18 @@ impl<I: Interner> SearchGraph<I> {
                 SolverLimit(last.available_depth.0 - 1)
             })
         } else {
-            Some(SolverLimit(tcx.recursion_limit()))
+            Some(SolverLimit(cx.recursion_limit()))
         }
     }
 
     fn stack_coinductive_from(
-        tcx: I,
+        cx: I,
         stack: &IndexVec<StackDepth, StackEntry<I>>,
         head: StackDepth,
     ) -> bool {
         stack.raw[head.index()..]
             .iter()
-            .all(|entry| entry.input.value.goal.predicate.is_coinductive(tcx))
+            .all(|entry| entry.input.value.goal.predicate.is_coinductive(cx))
     }
 
     // When encountering a solver cycle, the result of the current goal
@@ -222,8 +215,8 @@ impl<I: Interner> SearchGraph<I> {
         let current_cycle_root = &mut stack[current_root.as_usize()];
         for entry in cycle_participants {
             entry.non_root_cycle_participant = entry.non_root_cycle_participant.max(Some(head));
-            current_cycle_root.cycle_participants.insert(entry.input);
-            current_cycle_root.cycle_participants.extend(mem::take(&mut entry.cycle_participants));
+            current_cycle_root.nested_goals.insert(entry.input);
+            current_cycle_root.nested_goals.extend(mem::take(&mut entry.nested_goals));
         }
     }
 
@@ -247,8 +240,8 @@ impl<I: Interner> SearchGraph<I> {
     /// so we use a separate cache. Alternatively we could use
     /// a single cache and share it between coherence and ordinary
     /// trait solving.
-    pub(super) fn global_cache(&self, tcx: I) -> I::EvaluationCache {
-        tcx.evaluation_cache(self.mode)
+    pub(super) fn global_cache(&self, cx: I) -> I::EvaluationCache {
+        cx.evaluation_cache(self.mode)
     }
 
     /// Probably the most involved method of the whole solver.
@@ -257,24 +250,24 @@ impl<I: Interner> SearchGraph<I> {
     /// handles caching, overflow, and coinductive cycles.
     pub(super) fn with_new_goal<D: SolverDelegate<Interner = I>>(
         &mut self,
-        tcx: I,
+        cx: I,
         input: CanonicalInput<I>,
         inspect: &mut ProofTreeBuilder<D>,
         mut prove_goal: impl FnMut(&mut Self, &mut ProofTreeBuilder<D>) -> QueryResult<I>,
     ) -> QueryResult<I> {
         self.check_invariants();
         // Check for overflow.
-        let Some(available_depth) = Self::allowed_depth_for_nested(tcx, &self.stack) else {
+        let Some(available_depth) = Self::allowed_depth_for_nested(cx, &self.stack) else {
             if let Some(last) = self.stack.raw.last_mut() {
                 last.encountered_overflow = true;
             }
 
             inspect
                 .canonical_goal_evaluation_kind(inspect::WipCanonicalGoalEvaluationKind::Overflow);
-            return Self::response_no_constraints(tcx, input, Certainty::overflow(true));
+            return Self::response_no_constraints(cx, input, Certainty::overflow(true));
         };
 
-        if let Some(result) = self.lookup_global_cache(tcx, input, available_depth, inspect) {
+        if let Some(result) = self.lookup_global_cache(cx, input, available_depth, inspect) {
             debug!("global cache hit");
             return result;
         }
@@ -287,12 +280,12 @@ impl<I: Interner> SearchGraph<I> {
         if let Some(entry) = cache_entry
             .with_coinductive_stack
             .as_ref()
-            .filter(|p| Self::stack_coinductive_from(tcx, &self.stack, p.head))
+            .filter(|p| Self::stack_coinductive_from(cx, &self.stack, p.head))
             .or_else(|| {
                 cache_entry
                     .with_inductive_stack
                     .as_ref()
-                    .filter(|p| !Self::stack_coinductive_from(tcx, &self.stack, p.head))
+                    .filter(|p| !Self::stack_coinductive_from(cx, &self.stack, p.head))
             })
         {
             debug!("provisional cache hit");
@@ -315,7 +308,7 @@ impl<I: Interner> SearchGraph<I> {
             inspect.canonical_goal_evaluation_kind(
                 inspect::WipCanonicalGoalEvaluationKind::CycleInStack,
             );
-            let is_coinductive_cycle = Self::stack_coinductive_from(tcx, &self.stack, stack_depth);
+            let is_coinductive_cycle = Self::stack_coinductive_from(cx, &self.stack, stack_depth);
             let usage_kind = if is_coinductive_cycle {
                 HasBeenUsed::COINDUCTIVE_CYCLE
             } else {
@@ -328,9 +321,9 @@ impl<I: Interner> SearchGraph<I> {
             return if let Some(result) = self.stack[stack_depth].provisional_result {
                 result
             } else if is_coinductive_cycle {
-                Self::response_no_constraints(tcx, input, Certainty::Yes)
+                Self::response_no_constraints(cx, input, Certainty::Yes)
             } else {
-                Self::response_no_constraints(tcx, input, Certainty::overflow(false))
+                Self::response_no_constraints(cx, input, Certainty::overflow(false))
             };
         } else {
             // No entry, we push this goal on the stack and try to prove it.
@@ -342,7 +335,7 @@ impl<I: Interner> SearchGraph<I> {
                 non_root_cycle_participant: None,
                 encountered_overflow: false,
                 has_been_used: HasBeenUsed::empty(),
-                cycle_participants: Default::default(),
+                nested_goals: Default::default(),
                 provisional_result: None,
             };
             assert_eq!(self.stack.push(entry), depth);
@@ -355,28 +348,30 @@ impl<I: Interner> SearchGraph<I> {
         // not tracked by the cache key and from outside of this anon task, it
         // must not be added to the global cache. Notably, this is the case for
         // trait solver cycles participants.
-        let ((final_entry, result), dep_node) = tcx.with_cached_task(|| {
+        let ((final_entry, result), dep_node) = cx.with_cached_task(|| {
             for _ in 0..FIXPOINT_STEP_LIMIT {
-                match self.fixpoint_step_in_task(tcx, input, inspect, &mut prove_goal) {
+                match self.fixpoint_step_in_task(cx, input, inspect, &mut prove_goal) {
                     StepResult::Done(final_entry, result) => return (final_entry, result),
                     StepResult::HasChanged => debug!("fixpoint changed provisional results"),
                 }
             }
 
             debug!("canonical cycle overflow");
-            let current_entry = self.pop_stack();
+            let current_entry = self.stack.pop().unwrap();
             debug_assert!(current_entry.has_been_used.is_empty());
-            let result = Self::response_no_constraints(tcx, input, Certainty::overflow(false));
+            let result = Self::response_no_constraints(cx, input, Certainty::overflow(false));
             (current_entry, result)
         });
 
-        let proof_tree = inspect.finalize_canonical_goal_evaluation(tcx);
+        let proof_tree = inspect.finalize_canonical_goal_evaluation(cx);
+
+        self.update_parent_goal(final_entry.reached_depth, final_entry.encountered_overflow);
 
         // We're now done with this goal. In case this goal is involved in a larger cycle
         // do not remove it from the provisional cache and update its provisional result.
         // We only add the root of cycles to the global cache.
         if let Some(head) = final_entry.non_root_cycle_participant {
-            let coinductive_stack = Self::stack_coinductive_from(tcx, &self.stack, head);
+            let coinductive_stack = Self::stack_coinductive_from(cx, &self.stack, head);
 
             let entry = self.provisional_cache.get_mut(&input).unwrap();
             entry.stack_depth = None;
@@ -394,15 +389,15 @@ impl<I: Interner> SearchGraph<I> {
             //
             // We must not use the global cache entry of a root goal if a cycle
             // participant is on the stack. This is necessary to prevent unstable
-            // results. See the comment of `StackEntry::cycle_participants` for
+            // results. See the comment of `StackEntry::nested_goals` for
             // more details.
-            self.global_cache(tcx).insert(
-                tcx,
+            self.global_cache(cx).insert(
+                cx,
                 input,
                 proof_tree,
                 reached_depth,
                 final_entry.encountered_overflow,
-                final_entry.cycle_participants,
+                final_entry.nested_goals,
                 dep_node,
                 result,
             )
@@ -418,15 +413,15 @@ impl<I: Interner> SearchGraph<I> {
     /// this goal.
     fn lookup_global_cache<D: SolverDelegate<Interner = I>>(
         &mut self,
-        tcx: I,
+        cx: I,
         input: CanonicalInput<I>,
         available_depth: SolverLimit,
         inspect: &mut ProofTreeBuilder<D>,
     ) -> Option<QueryResult<I>> {
         let CacheData { result, proof_tree, additional_depth, encountered_overflow } = self
-            .global_cache(tcx)
+            .global_cache(cx)
             // FIXME: Awkward `Limit -> usize -> Limit`.
-            .get(tcx, input, self.stack.iter().map(|e| e.input), available_depth.0)?;
+            .get(cx, input, self.stack.iter().map(|e| e.input), available_depth.0)?;
 
         // If we're building a proof tree and the current cache entry does not
         // contain a proof tree, we do not use the entry but instead recompute
@@ -441,14 +436,9 @@ impl<I: Interner> SearchGraph<I> {
             }
         }
 
-        // Update the reached depth of the current goal to make sure
-        // its state is the same regardless of whether we've used the
-        // global cache or not.
+        // Adjust the parent goal as if we actually computed this goal.
         let reached_depth = self.stack.next_index().plus(additional_depth);
-        if let Some(last) = self.stack.raw.last_mut() {
-            last.reached_depth = last.reached_depth.max(reached_depth);
-            last.encountered_overflow |= encountered_overflow;
-        }
+        self.update_parent_goal(reached_depth, encountered_overflow);
 
         Some(result)
     }
@@ -467,7 +457,7 @@ impl<I: Interner> SearchGraph<I> {
     /// point we are done.
     fn fixpoint_step_in_task<D, F>(
         &mut self,
-        tcx: I,
+        cx: I,
         input: CanonicalInput<I>,
         inspect: &mut ProofTreeBuilder<D>,
         prove_goal: &mut F,
@@ -477,7 +467,7 @@ impl<I: Interner> SearchGraph<I> {
         F: FnMut(&mut Self, &mut ProofTreeBuilder<D>) -> QueryResult<I>,
     {
         let result = prove_goal(self, inspect);
-        let stack_entry = self.pop_stack();
+        let stack_entry = self.stack.pop().unwrap();
         debug_assert_eq!(stack_entry.input, input);
 
         // If the current goal is not the root of a cycle, we are done.
@@ -506,9 +496,9 @@ impl<I: Interner> SearchGraph<I> {
         let reached_fixpoint = if let Some(r) = stack_entry.provisional_result {
             r == result
         } else if stack_entry.has_been_used == HasBeenUsed::COINDUCTIVE_CYCLE {
-            Self::response_no_constraints(tcx, input, Certainty::Yes) == result
+            Self::response_no_constraints(cx, input, Certainty::Yes) == result
         } else if stack_entry.has_been_used == HasBeenUsed::INDUCTIVE_CYCLE {
-            Self::response_no_constraints(tcx, input, Certainty::overflow(false)) == result
+            Self::response_no_constraints(cx, input, Certainty::overflow(false)) == result
         } else {
             false
         };
@@ -528,11 +518,11 @@ impl<I: Interner> SearchGraph<I> {
     }
 
     fn response_no_constraints(
-        tcx: I,
+        cx: I,
         goal: CanonicalInput<I>,
         certainty: Certainty,
     ) -> QueryResult<I> {
-        Ok(super::response_no_constraints_raw(tcx, goal.max_universe, goal.variables, certainty))
+        Ok(super::response_no_constraints_raw(cx, goal.max_universe, goal.variables, certainty))
     }
 
     #[allow(rustc::potential_query_instability)]
@@ -554,27 +544,27 @@ impl<I: Interner> SearchGraph<I> {
                 non_root_cycle_participant,
                 encountered_overflow: _,
                 has_been_used,
-                ref cycle_participants,
+                ref nested_goals,
                 provisional_result,
             } = *entry;
             let cache_entry = provisional_cache.get(&entry.input).unwrap();
             assert_eq!(cache_entry.stack_depth, Some(depth));
             if let Some(head) = non_root_cycle_participant {
                 assert!(head < depth);
-                assert!(cycle_participants.is_empty());
+                assert!(nested_goals.is_empty());
                 assert_ne!(stack[head].has_been_used, HasBeenUsed::empty());
 
                 let mut current_root = head;
                 while let Some(parent) = stack[current_root].non_root_cycle_participant {
                     current_root = parent;
                 }
-                assert!(stack[current_root].cycle_participants.contains(&input));
+                assert!(stack[current_root].nested_goals.contains(&input));
             }
 
-            if !cycle_participants.is_empty() {
+            if !nested_goals.is_empty() {
                 assert!(provisional_result.is_some() || !has_been_used.is_empty());
                 for entry in stack.iter().take(depth.as_usize()) {
-                    assert_eq!(cycle_participants.get(&entry.input), None);
+                    assert_eq!(nested_goals.get(&entry.input), None);
                 }
             }
         }

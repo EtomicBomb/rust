@@ -34,7 +34,7 @@ use crate::delegate::SolverDelegate;
 /// How many fixpoint iterations we should attempt inside of the solver before bailing
 /// with overflow.
 ///
-/// We previously used  `tcx.recursion_limit().0.checked_ilog2().unwrap_or(0)` for this.
+/// We previously used  `cx.recursion_limit().0.checked_ilog2().unwrap_or(0)` for this.
 /// However, it feels unlikely that uncreasing the recursion limit by a power of two
 /// to get one more itereation is every useful or desirable. We now instead used a constant
 /// here. If there ever ends up some use-cases where a bigger number of fixpoint iterations
@@ -48,12 +48,20 @@ enum GoalEvaluationKind {
     Nested,
 }
 
+// FIXME(trait-system-refactor-initiative#117): we don't detect whether a response
+// ended up pulling down any universes.
 fn has_no_inference_or_external_constraints<I: Interner>(
     response: ty::Canonical<I, Response<I>>,
 ) -> bool {
-    response.value.external_constraints.region_constraints.is_empty()
-        && response.value.var_values.is_identity()
-        && response.value.external_constraints.opaque_types.is_empty()
+    let ExternalConstraintsData {
+        ref region_constraints,
+        ref opaque_types,
+        ref normalization_nested_goals,
+    } = *response.value.external_constraints;
+    response.value.var_values.is_identity()
+        && region_constraints.is_empty()
+        && opaque_types.is_empty()
+        && normalization_nested_goals.is_empty()
 }
 
 impl<'a, D, I> EvalCtxt<'a, D>
@@ -182,7 +190,7 @@ where
                 return self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes);
             }
             ty::ConstKind::Unevaluated(uv) => {
-                self.cx().type_of(uv.def).instantiate(self.cx(), &uv.args)
+                self.cx().type_of(uv.def).instantiate(self.cx(), uv.args)
             }
             ty::ConstKind::Expr(_) => unimplemented!(
                 "`feature(generic_const_exprs)` is not supported in the new trait solver"
@@ -285,7 +293,7 @@ where
 }
 
 fn response_no_constraints_raw<I: Interner>(
-    tcx: I,
+    cx: I,
     max_universe: ty::UniverseIndex,
     variables: I::CanonicalVars,
     certainty: Certainty,
@@ -294,10 +302,10 @@ fn response_no_constraints_raw<I: Interner>(
         max_universe,
         variables,
         value: Response {
-            var_values: ty::CanonicalVarValues::make_identity(tcx, variables),
-            // FIXME: maybe we should store the "no response" version in tcx, like
-            // we do for tcx.types and stuff.
-            external_constraints: tcx.mk_external_constraints(ExternalConstraintsData::default()),
+            var_values: ty::CanonicalVarValues::make_identity(cx, variables),
+            // FIXME: maybe we should store the "no response" version in cx, like
+            // we do for cx.types and stuff.
+            external_constraints: cx.mk_external_constraints(ExternalConstraintsData::default()),
             certainty,
         },
         defining_opaque_types: Default::default(),

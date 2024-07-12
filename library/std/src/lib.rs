@@ -266,6 +266,7 @@
 )]
 #![cfg_attr(any(windows, target_os = "uefi"), feature(round_char_boundary))]
 #![cfg_attr(target_family = "wasm", feature(stdarch_wasm_atomic_wait))]
+#![cfg_attr(target_arch = "wasm64", feature(simd_wasm64))]
 #![cfg_attr(
     all(any(target_arch = "x86_64", target_arch = "x86"), target_os = "uefi"),
     feature(stdarch_x86_has_cpuid)
@@ -334,13 +335,10 @@
 #![feature(fmt_internals)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
-#![feature(hint_assert_unchecked)]
 #![feature(ip)]
 #![feature(maybe_uninit_slice)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_write_slice)]
 #![feature(panic_can_unwind)]
-#![feature(panic_info_message)]
 #![feature(panic_internals)]
 #![feature(pointer_is_aligned_to)]
 #![feature(portable_simd)]
@@ -407,7 +405,6 @@
 #![feature(const_ip)]
 #![feature(const_ipv4)]
 #![feature(const_ipv6)]
-#![feature(const_maybe_uninit_uninit_array)]
 #![feature(const_waker)]
 #![feature(thread_local_internals)]
 // tidy-alphabetical-end

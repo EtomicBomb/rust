@@ -56,8 +56,6 @@ lint_builtin_asm_labels = avoid using named labels in inline assembly
     .help = only local labels of the form `<number>:` should be used in inline asm
     .note = see the asm section of Rust By Example <https://doc.rust-lang.org/nightly/rust-by-example/unsafe/asm.html#labels> for more information
 
-lint_builtin_box_pointers = type uses owned (Box type) pointers: {$ty}
-
 lint_builtin_clashing_extern_diff_name = `{$this}` redeclares `{$orig}` with a different signature
     .previous_decl_label = `{$orig}` previously declared here
     .mismatch_label = this signature doesn't match the previous declaration
@@ -186,6 +184,10 @@ lint_cfg_attr_no_attributes =
     `#[cfg_attr]` does not expand to any attributes
 
 lint_check_name_unknown_tool = unknown lint tool: `{$tool_name}`
+
+lint_closure_returning_async_block = closure returning async block can be made into an async closure
+    .label = this async block can be removed, and the closure can be turned into an async closure
+    .suggestion = turn this into an async closure
 
 lint_command_line_source = `forbid` lint level was set on command line
 
@@ -441,6 +443,9 @@ lint_lintpass_by_hand = implementing `LintPass` by hand
 lint_macro_expanded_macro_exports_accessed_by_absolute_paths = macro-expanded `macro_export` macros from the current crate cannot be referred to by absolute paths
     .note = the macro is defined here
 
+lint_macro_expr_fragment_specifier_2024_migration =
+    the `expr` fragment specifier will accept more expressions in the 2024 edition
+    .suggestion = to keep the existing behavior, use the `expr_2021` fragment specifier
 lint_macro_is_private = macro `{$ident}` is private
 
 lint_macro_rule_never_used = rule #{$n} of macro `{$name}` is never used
@@ -603,6 +608,9 @@ lint_opaque_hidden_inferred_bound_sugg = add this bound
 
 lint_or_patterns_back_compat = the meaning of the `pat` fragment specifier is changing in Rust 2021, which may affect this macro
     .suggestion = use pat_param to preserve semantics
+
+lint_out_of_scope_macro_calls = cannot find macro `{$path}` in this scope
+    .help = import `macro_rules` with `use` to make it callable above its definition
 
 lint_overflowing_bin_hex = literal out of range for `{$ty}`
     .negative_note = the literal `{$lit}` (decimal `{$dec}`) does not fit into the type `{$ty}`

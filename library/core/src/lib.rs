@@ -34,12 +34,9 @@
 //!   Rust user code is to call the functions provided by this library instead (such as
 //!   `ptr::copy`).
 //!
-//! * `rust_begin_panic` - This function takes four arguments, a
-//!   `fmt::Arguments`, a `&'static str`, and two `u32`'s. These four arguments
-//!   dictate the panic message, the file at which panic was invoked, and the
-//!   line and column inside the file. It is up to consumers of this core
+//! * Panic handler - This function takes one argument, a `&panic::PanicInfo`. It is up to consumers of this core
 //!   library to define this panic function; it is only required to never
-//!   return. This requires a `lang` attribute named `panic_impl`.
+//!   return. You should mark your implementation using `#[panic_handler]`.
 //!
 //! * `rust_eh_personality` - is used by the failure mechanisms of the
 //!    compiler. This is often mapped to GCC's personality function, but crates
@@ -130,7 +127,6 @@
 #![feature(const_fmt_arguments_new)]
 #![feature(const_hash)]
 #![feature(const_heap)]
-#![feature(const_hint_assert_unchecked)]
 #![feature(const_index_range_slice_index)]
 #![feature(const_int_from_str)]
 #![feature(const_intrinsic_copy)]
@@ -140,7 +136,6 @@
 #![feature(const_likely)]
 #![feature(const_maybe_uninit_as_mut_ptr)]
 #![feature(const_maybe_uninit_assume_init)]
-#![feature(const_maybe_uninit_uninit_array)]
 #![feature(const_nonnull_new)]
 #![feature(const_num_midpoint)]
 #![feature(const_option)]
@@ -177,7 +172,6 @@
 #![feature(is_ascii_octdigit)]
 #![feature(isqrt)]
 #![feature(link_cfg)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(offset_of_enum)]
 #![feature(offset_of_nested)]
 #![feature(panic_internals)]
@@ -233,6 +227,7 @@
 #![feature(let_chains)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
+#![feature(marker_trait_attr)]
 #![feature(min_exhaustive_patterns)]
 #![feature(min_specialization)]
 #![feature(multiple_supertrait_upcastable)]
@@ -400,6 +395,8 @@ pub mod panicking;
 #[unstable(feature = "core_pattern_types", issue = "none")]
 pub mod pat;
 pub mod pin;
+#[unstable(feature = "new_range_api", issue = "125687")]
+pub mod range;
 pub mod result;
 pub mod sync;
 

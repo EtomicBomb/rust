@@ -1069,7 +1069,6 @@ impl AtomicBool {
     /// # Examples
     ///
     /// ```
-    /// #![feature(atomic_bool_fetch_not)]
     /// use std::sync::atomic::{AtomicBool, Ordering};
     ///
     /// let foo = AtomicBool::new(true);
@@ -1081,7 +1080,7 @@ impl AtomicBool {
     /// assert_eq!(foo.load(Ordering::SeqCst), true);
     /// ```
     #[inline]
-    #[unstable(feature = "atomic_bool_fetch_not", issue = "98485")]
+    #[stable(feature = "atomic_bool_fetch_not", since = "CURRENT_RUSTC_VERSION")]
     #[cfg(target_has_atomic = "8")]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub fn fetch_not(&self, order: Ordering) -> bool {
@@ -3766,7 +3765,7 @@ impl<T> fmt::Debug for AtomicPtr<T> {
 #[stable(feature = "atomic_pointer", since = "1.24.0")]
 impl<T> fmt::Pointer for AtomicPtr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Pointer::fmt(&self.load(Ordering::SeqCst), f)
+        fmt::Pointer::fmt(&self.load(Ordering::Relaxed), f)
     }
 }
 

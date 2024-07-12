@@ -55,8 +55,6 @@ hir_analysis_cannot_capture_late_bound_ty =
     cannot capture late-bound type parameter in {$what}
     .label = parameter defined here
 
-hir_analysis_cast_thin_pointer_to_fat_pointer = cannot cast thin pointer `{$expr_ty}` to fat pointer `{$cast_ty}`
-
 hir_analysis_closure_implicit_hrtb = implicit types in closure signatures are forbidden when `for<...>` is present
     .label = `for<...>` is here
 
@@ -119,6 +117,10 @@ hir_analysis_drop_impl_reservation = reservation `Drop` impls are not supported
 
 hir_analysis_duplicate_precise_capture = cannot capture parameter `{$name}` twice
     .label = parameter captured again here
+
+hir_analysis_effects_without_next_solver = using `#![feature(effects)]` without enabling next trait solver globally
+    .note = the next trait solver must be enabled globally for the effects feature to work correctly
+    .help = use `-Znext-solver` to enable
 
 hir_analysis_empty_specialization = specialization impl does not specialize any associated items
     .note = impl is a specialization of this impl
@@ -370,10 +372,6 @@ hir_analysis_paren_sugar_attribute = the `#[rustc_paren_sugar]` attribute is a t
 
 hir_analysis_parenthesized_fn_trait_expansion =
     parenthesized trait syntax expands to `{$expanded_type}`
-
-hir_analysis_pass_to_variadic_function = can't pass `{$ty}` to variadic function
-    .suggestion = cast the value to `{$cast_ty}`
-    .help = cast the value to `{$cast_ty}`
 
 hir_analysis_pattern_type_non_const_range = range patterns must have constant range start and end
 hir_analysis_pattern_type_wild_pat = wildcard patterns are not permitted for pattern types
