@@ -28,6 +28,7 @@ pub(crate) mod search_index;
 #[cfg(test)]
 mod tests;
 
+mod copy_dir;
 mod context;
 mod print_item;
 mod sidebar;

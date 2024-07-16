@@ -14,6 +14,7 @@ use rustc_span::{sym, FileName, Symbol};
 
 use super::print_item::{full_path, item_path, print_item};
 use super::write_shared::{write_shared};
+use super::copy_dir::{copy_dir_all};
 use super::{
     collect_spans_and_sources, scrape_examples_help,
     sidebar::print_sidebar,
@@ -470,6 +471,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             call_locations,
             no_emit_shared,
             html_no_source,
+            include_rendered_docs,
             ..
         } = options;
 
@@ -572,6 +574,10 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             types_with_notable_traits: FxHashSet::default(),
             is_inside_inlined_module: false,
         };
+
+        for extern_docs in include_rendered_docs.iter() {
+            try_err!(copy_dir_all(&extern_docs.0, &cx.dst), &extern_docs.0);
+        }
 
         if emit_crate {
             sources::render(&mut cx, &krate)?;

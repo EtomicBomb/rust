@@ -630,6 +630,15 @@ fn opts() -> Vec<RustcOptGroup> {
                 "PATH",
             )
         }),
+        unstable("include-rendered-docs", |o| {
+            o.optopt(
+                "",
+                "include-rendered-docs",
+                "Copies docs from an external crate to the --out-dir. Expects PATH to be a path directly
+                to the external crate's subdirectory in its doc root.",
+                "PATH",
+            )
+        }),
         // deprecated / removed options
         unstable("disable-minification", |o| o.optflagmulti("", "disable-minification", "removed")),
         stable("plugin-path", |o| {

@@ -296,6 +296,8 @@ pub(crate) struct RenderOptions {
     pub(crate) read_rendered_cci: bool,
     /// If `true` (default) write the shared cross-crate information to the doc root
     pub(crate) write_rendered_cci: bool,
+    /// Copies these folders into our doc root.
+    pub(crate) include_rendered_docs: Vec<PathToDocSubdirectory>,
     /// The location of the doc directory for externally located crates.
     /// Absolute path ending in doc/.
     pub(crate) parts_paths: Vec<PathToParts>,
@@ -505,7 +507,10 @@ impl Options {
             Err(err) => dcx.fatal(err),
         };
 
-        let parts_paths = matches.opt_strs("include-info-json").iter()
+        let include_rendered_docs = matches.opt_strs("include-rendered-docs").into_iter()
+            .map(|p| PathToDocSubdirectory(PathBuf::from(p)))
+            .collect();
+        let parts_paths = matches.opt_strs("include-info-json").into_iter()
             .map(|path| PathToParts(PathBuf::from(path)))
             .collect();
 
@@ -842,6 +847,7 @@ impl Options {
             read_rendered_cci,
             write_rendered_cci,
             parts_paths,
+            include_rendered_docs,
             parts_out_dir,
         };
         Some((options, render_options))
@@ -920,6 +926,10 @@ fn parse_extern_html_roots(
     }
     Ok(externs)
 }
+
+/// Path to the doc subdirectory for a specific crate, for example `target/doc/serde_json`.
+#[derive(Clone, Debug)]
+pub(crate) struct PathToDocSubdirectory(pub PathBuf);
 
 /// Path to cci root, including doc.parts, but not the crate name
 ///
