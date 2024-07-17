@@ -15,43 +15,25 @@ use itertools::Itertools as _;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(from = "Value")]
 #[serde(into = "Value")]
-pub struct SortedJson(String);
+pub(crate) struct SortedJson(String);
 
 impl SortedJson {
     /// If you pass in an array, it will not be sorted.
-    pub fn serialize<T: Serialize>(item: T) -> Self {
+    pub(crate) fn serialize<T: Serialize>(item: T) -> Self {
         SortedJson(serde_json::to_string(&item).unwrap())
     }
 
-    /// Assumes that `item` is already JSON encoded
-    ///
-    /// TODO: remove this, and use SortedJson everywhere JSON is rendered
-    pub fn preserialized(item: String) -> Self {
-        SortedJson(item)
-    }
-
     /// Serializes and sorts
-    pub fn array<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
+    pub(crate) fn array<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
         let items = items.into_iter()
             .sorted_unstable_by(|a, b| a.borrow().cmp(&b.borrow()))
             .format_with(",", |item, f| f(item.borrow()));
         SortedJson(format!("[{}]", items))
     }
 
-    pub fn array_unsorted<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
+    pub(crate) fn array_unsorted<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
         let items = items.into_iter().format_with(",", |item, f| f(item.borrow()));
         SortedJson(format!("[{items}]"))
-    }
-
-    pub fn object<K, V, I>(items: I) -> Self
-        where K: Borrow<SortedJson>,
-              V: Borrow<SortedJson>,
-              I: IntoIterator<Item=(K, V)>,
-    {
-        let items = items.into_iter()
-            .sorted_unstable_by(|a, b| a.0.borrow().cmp(&b.0.borrow()))
-            .format_with(",", |(k, v), f| f(&format_args!("{}:{}", k.borrow(), v.borrow())));
-        SortedJson(format!("{{{}}}", items))
     }
 }
 
@@ -80,8 +62,16 @@ mod tests {
     fn check(json: SortedJson, serialized: &str) {
         assert_eq!(json.to_string(), serialized);
         assert_eq!(serde_json::to_string(&json).unwrap(), serialized);
+
         let json = json.to_string();
         let json: SortedJson = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(json.to_string(), serialized);
+        assert_eq!(serde_json::to_string(&json).unwrap(), serialized);
+
+        let json = serde_json::to_string(&json).unwrap();
+        let json: SortedJson = serde_json::from_str(&json).unwrap();
+
         assert_eq!(json.to_string(), serialized);
         assert_eq!(serde_json::to_string(&json).unwrap(), serialized);
     }
@@ -97,6 +87,13 @@ mod tests {
     fn boolean() {
         let json = SortedJson::serialize(true);
         let serialized = "true";
+        check(json, serialized);
+    }
+
+    #[test]
+    fn string() {
+        let json = SortedJson::serialize("he\"llo");
+        let serialized = r#""he\"llo""#;
         check(json, serialized);
     }
 
@@ -117,22 +114,22 @@ mod tests {
     }
 
     #[test]
+    fn nested_array() {
+        let a = SortedJson::serialize(3);
+        let b = SortedJson::serialize(2);
+        let c = SortedJson::serialize(1);
+        let d = SortedJson::serialize([1, 3, 2]);
+        let json = SortedJson::array([a, b, c, d]);
+        let serialized = r#"[1,2,3,[1,3,2]]"#;
+        check(json, serialized);
+    }
+
+    #[test]
     fn array_unsorted() {
         let items = ["c", "a", "b"];
         let serialized = r#"["c","a","b"]"#;
         let items: Vec<SortedJson> = items.into_iter().map(SortedJson::serialize).collect();
         let json = SortedJson::array_unsorted(items);
-        check(json, serialized);
-    }
-
-    #[test]
-    fn object() {
-        let items = [("c", 1), ("a", 10), ("b", 3)];
-        let serialized = r#"{"a":10,"b":3,"c":1}"#;
-        let items: Vec<(SortedJson, SortedJson)> = items.into_iter()
-            .map(|(k, v)| (SortedJson::serialize(k), SortedJson::serialize(v)))
-            .collect();
-        let json = SortedJson::object(items);
         check(json, serialized);
     }
 }

@@ -4,12 +4,14 @@ use std::fs;
 
 /// Recursively copies the contents of the directory `src` to the directory `dst`.
 /// Analogous to `cp -rf src/* dst` and Python's `shutil.copytree`
+///
+/// Creates all directories needed to perform the copy.
 pub(crate) fn copy_dir_all<S: Into<PathBuf>, D: Into<PathBuf>>(src: S, dst: D) -> Result<()> {
-    copy_dir_mono(src.into(), dst.into())
+    copy_dir_all_mono(src.into(), dst.into())
 }
 
 /// Helper for `copy_dir`
-fn copy_dir_mono(src: PathBuf, dst: PathBuf) -> Result<()> {
+fn copy_dir_all_mono(src: PathBuf, dst: PathBuf) -> Result<()> {
     let mut dirs: Vec<(PathBuf, PathBuf)> = Vec::default();
 
     if !src.is_dir() {

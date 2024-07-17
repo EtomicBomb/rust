@@ -429,6 +429,7 @@ pub(crate) fn build_index<'tcx>(
         })
         .collect::<Vec<_>>();
 
+    // XXX: update CrateInfoVersion in write_shared upon any changes to this format.
     struct CrateData<'a> {
         items: Vec<&'a IndexItem>,
         paths: Vec<(ItemType, Vec<Symbol>, Option<Vec<Symbol>>)>,
@@ -681,6 +682,8 @@ pub(crate) fn build_index<'tcx>(
         crate_items.len() + 1,
         desc.iter().map(|(len, _)| *len).sum::<usize>() + empty_desc.len()
     );
+
+    // XXX: update CrateInfoVersion in write_shared upon any changes to this format.
 
     // The index, which is actually used to search, is JSON
     // It uses `JSON.parse(..)` to actually load, since JSON

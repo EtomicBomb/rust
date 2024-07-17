@@ -81,6 +81,7 @@ pub(crate) fn write_shared(
     let crate_name_json = SortedJson::serialize(crate_name); // "rand"
     let external_crates = hack_get_external_crate_names(cx)?;
     let info = CrateInfo {
+        version: CrateInfoVersion::V1,
         src_files_js: PartsAndLocations::<SourcesPart>::get(cx, &crate_name_json)?,
         search_index_js: PartsAndLocations::<SearchIndexPart>::get(cx, index)?,
         all_crates: PartsAndLocations::<AllCratesPart>::get(crate_name_json.clone())?,
@@ -193,9 +194,11 @@ fn write_search_desc(cx: &mut Context<'_>, krate: &Crate, search_desc: &[(usize,
     Ok(())
 }
 
+
 /// Written to `crate-info.json`. Contains pre-rendered contents to insert into the CCI template
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct CrateInfo {
+    version: CrateInfoVersion,
     src_files_js: PartsAndLocations<SourcesPart>,
     search_index_js: PartsAndLocations<SearchIndexPart>,
     all_crates: PartsAndLocations<AllCratesPart>,
@@ -215,7 +218,7 @@ impl CrateInfo {
             .or_else(|| (&self.type_impl as &dyn Any).downcast_ref())
     }
 
-    /// read all of the crate info from its location on the filesystem
+    /// Read all of the crate info from its location on the filesystem
     fn read(parts_paths: &[PathToParts]) -> Result<Vec<Self>, Error> {
         parts_paths.iter()
             .map(|parts_path| {
@@ -227,6 +230,15 @@ impl CrateInfo {
             .collect::<Result<Vec<CrateInfo>, Error>>()
     }
 }
+
+/// Version for the format of the crate-info.json file.
+///
+/// This enum should only ever have one variant, representing the current version.
+/// Gives pretty good error message about expecting the current version on deserialize.
+///
+/// Must be incremented (V2, V3, etc.) upon any changes to the search index or CrateInfo.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+enum CrateInfoVersion { V1 }
 
 /// Paths (relative to the doc root) and their pre-merge contents
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -324,7 +336,7 @@ fn hack_get_external_crate_names(cx: &Context<'_>) -> Result<Vec<String>, Error>
         return Ok(Vec::default());
     };
     // this is only run once so it's fine not to cache it
-    // dot_matches_new_line false: all crates on same line. greedy: match last bracket
+    // !dot_matches_new_line: all crates on same line. greedy: match last bracket
     let regex = Regex::new(r"\[.*\]").unwrap();
     let Some(content) = regex.find(&content) else {
         return Err(Error::new("could not find crates list in crates.js", path));
