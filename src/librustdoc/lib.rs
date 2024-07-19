@@ -608,10 +608,10 @@ fn opts() -> Vec<RustcOptGroup> {
                 "",
                 "merge",
                 "Controls how rustdoc handles files from previously documented crates in the doc root.
-                          auto = append (default)
+                          read-write = append to the existing files (default)
                           none = do not write new versions of these files
                           write-only = overwrite these files without reading previous content",
-                "auto|none|write-only",
+                "read-write|none|write-only",
             )
         }),
         unstable("include-info-json", |o| {

@@ -948,11 +948,11 @@ struct ShouldMerge {
 /// reports an error.
 fn parse_merge(matches: &getopts::Matches) -> Result<ShouldMerge, &'static str> {
     match matches.opt_str("merge").as_deref() {
-        // default = auto
+        // default = read-write
         None => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
-        Some("auto") => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("read-write") => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
         Some("none") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: false }),
         Some("write-only") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: true }),
-        Some(_) => Err("argument to --merge must be `auto`, `none`, or `write-only`"),
+        Some(_) => Err("argument to --merge must be `read-write`, `none`, or `write-only`"),
     }
 }
