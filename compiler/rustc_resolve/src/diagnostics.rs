@@ -371,6 +371,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         };
 
         let mut suggestion = None;
+        let mut span = binding_span;
         match import.kind {
             ImportKind::Single { type_ns_only: true, .. } => {
                 suggestion = Some(format!("self as {suggested_name}"))
@@ -381,12 +382,13 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 {
                     if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(binding_span) {
                         if pos <= snippet.len() {
-                            suggestion = Some(format!(
-                                "{} as {}{}",
-                                &snippet[..pos],
-                                suggested_name,
-                                if snippet.ends_with(';') { ";" } else { "" }
-                            ))
+                            span = binding_span
+                                .with_lo(binding_span.lo() + BytePos(pos as u32))
+                                .with_hi(
+                                    binding_span.hi()
+                                        - BytePos(if snippet.ends_with(';') { 1 } else { 0 }),
+                                );
+                            suggestion = Some(format!(" as {suggested_name}"));
                         }
                     }
                 }
@@ -402,9 +404,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
 
         if let Some(suggestion) = suggestion {
-            err.subdiagnostic(ChangeImportBindingSuggestion { span: binding_span, suggestion });
+            err.subdiagnostic(ChangeImportBindingSuggestion { span, suggestion });
         } else {
-            err.subdiagnostic(ChangeImportBinding { span: binding_span });
+            err.subdiagnostic(ChangeImportBinding { span });
         }
     }
 
@@ -1992,12 +1994,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             if let Some(candidate) = candidates.get(0) {
                 let path = {
                     // remove the possible common prefix of the path
-                    let start_index = (0..failed_segment_idx)
-                        .find(|&i| path[i].ident != candidate.path.segments[i].ident)
+                    let len = candidate.path.segments.len();
+                    let start_index = (0..=failed_segment_idx.min(len - 1))
+                        .find(|&i| path[i].ident.name != candidate.path.segments[i].ident.name)
                         .unwrap_or_default();
-                    let segments = (start_index..=failed_segment_idx)
-                        .map(|s| candidate.path.segments[s].clone())
-                        .collect();
+                    let segments =
+                        (start_index..len).map(|s| candidate.path.segments[s].clone()).collect();
                     Path { segments, span: Span::default(), tokens: None }
                 };
                 (
@@ -2530,7 +2532,13 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 && let NestedMetaItem::MetaItem(meta_item) = &nested[0]
                 && let MetaItemKind::NameValue(feature_name) = &meta_item.kind
             {
-                let note = errors::ItemWasBehindFeature { feature: feature_name.symbol };
+                let note = errors::ItemWasBehindFeature {
+                    feature: feature_name.symbol,
+                    span: meta_item.span,
+                };
+                err.subdiagnostic(note);
+            } else {
+                let note = errors::ItemWasCfgOut { span: cfg.span };
                 err.subdiagnostic(note);
             }
         }

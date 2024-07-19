@@ -24,12 +24,14 @@ pub mod elaborate;
 pub mod error;
 pub mod fast_reject;
 pub mod fold;
+#[cfg_attr(feature = "nightly", rustc_diagnostic_item = "type_ir_inherent")]
 pub mod inherent;
 pub mod ir_print;
 pub mod lang_items;
 pub mod lift;
 pub mod outlives;
 pub mod relate;
+pub mod search_graph;
 pub mod solve;
 
 // These modules are not `pub` since they are glob-imported.
