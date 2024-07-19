@@ -59,6 +59,8 @@ use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::ObligationCtxt;
 use rustc_trait_selection::traits::{self, ObligationCauseCode};
 
+use smallvec::SmallVec;
+
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub fn check_expr_has_type_or_error(
         &self,
@@ -517,7 +519,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Ty::new_error(tcx, e)
             }
             Res::Def(DefKind::Variant, _) => {
-                let e = report_unexpected_variant_res(tcx, res, qpath, expr.span, E0533, "value");
+                let e = report_unexpected_variant_res(
+                    tcx,
+                    res,
+                    Some(expr),
+                    qpath,
+                    expr.span,
+                    E0533,
+                    "value",
+                );
                 Ty::new_error(tcx, e)
             }
             _ => {
@@ -1437,9 +1447,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return;
         };
         if let hir::TyKind::Array(_, length) = ty.peel_refs().kind
-            && let hir::ArrayLen::Body(&hir::AnonConst { hir_id, .. }) = length
+            && let hir::ArrayLen::Body(ct) = length
         {
-            let span = self.tcx.hir().span(hir_id);
+            let span = ct.span();
             self.dcx().try_steal_modify_and_emit_err(
                 span,
                 StashKey::UnderscoreForArrayLengths,
@@ -2208,8 +2218,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         );
 
         let variant_ident_span = self.tcx.def_ident_span(variant.def_id).unwrap();
-        match variant.ctor_kind() {
-            Some(CtorKind::Fn) => match ty.kind() {
+        match variant.ctor {
+            Some((CtorKind::Fn, def_id)) => match ty.kind() {
                 ty::Adt(adt, ..) if adt.is_enum() => {
                     err.span_label(
                         variant_ident_span,
@@ -2220,28 +2230,44 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         ),
                     );
                     err.span_label(field.ident.span, "field does not exist");
+                    let fn_sig = self.tcx.fn_sig(def_id).instantiate_identity();
+                    let inputs = fn_sig.inputs().skip_binder();
+                    let fields = format!(
+                        "({})",
+                        inputs.iter().map(|i| format!("/* {i} */")).collect::<Vec<_>>().join(", ")
+                    );
+                    let (replace_span, sugg) = match expr.kind {
+                        hir::ExprKind::Struct(qpath, ..) => {
+                            (qpath.span().shrink_to_hi().with_hi(expr.span.hi()), fields)
+                        }
+                        _ => {
+                            (expr.span, format!("{ty}::{variant}{fields}", variant = variant.name))
+                        }
+                    };
                     err.span_suggestion_verbose(
-                        expr.span,
+                        replace_span,
                         format!(
                             "`{adt}::{variant}` is a tuple {kind_name}, use the appropriate syntax",
                             adt = ty,
                             variant = variant.name,
                         ),
-                        format!(
-                            "{adt}::{variant}(/* fields */)",
-                            adt = ty,
-                            variant = variant.name,
-                        ),
+                        sugg,
                         Applicability::HasPlaceholders,
                     );
                 }
                 _ => {
                     err.span_label(variant_ident_span, format!("`{ty}` defined here"));
                     err.span_label(field.ident.span, "field does not exist");
+                    let fn_sig = self.tcx.fn_sig(def_id).instantiate_identity();
+                    let inputs = fn_sig.inputs().skip_binder();
+                    let fields = format!(
+                        "({})",
+                        inputs.iter().map(|i| format!("/* {i} */")).collect::<Vec<_>>().join(", ")
+                    );
                     err.span_suggestion_verbose(
                         expr.span,
                         format!("`{ty}` is a tuple {kind_name}, use the appropriate syntax",),
-                        format!("{ty}(/* fields */)"),
+                        format!("{ty}{fields}"),
                         Applicability::HasPlaceholders,
                     );
                 }
@@ -2318,6 +2344,44 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         display
     }
 
+    /// Find the position of a field named `ident` in `base_def`, accounting for unnammed fields.
+    /// Return whether such a field has been found. The path to it is stored in `nested_fields`.
+    /// `ident` must have been adjusted beforehand.
+    fn find_adt_field(
+        &self,
+        base_def: ty::AdtDef<'tcx>,
+        ident: Ident,
+        nested_fields: &mut SmallVec<[(FieldIdx, &'tcx ty::FieldDef); 1]>,
+    ) -> bool {
+        // No way to find a field in an enum.
+        if base_def.is_enum() {
+            return false;
+        }
+
+        for (field_idx, field) in base_def.non_enum_variant().fields.iter_enumerated() {
+            if field.is_unnamed() {
+                // We have an unnamed field, recurse into the nested ADT to find `ident`.
+                // If we find it there, return immediately, and `nested_fields` will contain the
+                // correct path.
+                nested_fields.push((field_idx, field));
+
+                let field_ty = self.tcx.type_of(field.did).instantiate_identity();
+                let adt_def = field_ty.ty_adt_def().expect("expect Adt for unnamed field");
+                if self.find_adt_field(adt_def, ident, &mut *nested_fields) {
+                    return true;
+                }
+
+                nested_fields.pop();
+            } else if field.ident(self.tcx).normalize_to_macros_2_0() == ident {
+                // We found the field we wanted.
+                nested_fields.push((field_idx, field));
+                return true;
+            }
+        }
+
+        false
+    }
+
     // Check field access expressions
     fn check_field(
         &self,
@@ -2339,44 +2403,44 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     let body_hir_id = self.tcx.local_def_id_to_hir_id(self.body_id);
                     let (ident, def_scope) =
                         self.tcx.adjust_ident_and_get_scope(field, base_def.did(), body_hir_id);
-                    let mut adt_def = *base_def;
-                    let mut last_ty = None;
-                    let mut nested_fields = Vec::new();
-                    let mut index = None;
 
                     // we don't care to report errors for a struct if the struct itself is tainted
-                    if let Err(guar) = adt_def.non_enum_variant().has_errors() {
+                    if let Err(guar) = base_def.non_enum_variant().has_errors() {
                         return Ty::new_error(self.tcx(), guar);
                     }
-                    while let Some(idx) = self.tcx.find_field((adt_def.did(), ident)) {
-                        let &mut first_idx = index.get_or_insert(idx);
-                        let field = &adt_def.non_enum_variant().fields[idx];
-                        let field_ty = self.field_ty(expr.span, field, args);
-                        if let Some(ty) = last_ty {
-                            nested_fields.push((ty, idx));
-                        }
-                        if field.ident(self.tcx).normalize_to_macros_2_0() == ident {
-                            // Save the index of all fields regardless of their visibility in case
-                            // of error recovery.
-                            self.write_field_index(expr.hir_id, first_idx, nested_fields);
-                            let adjustments = self.adjust_steps(&autoderef);
-                            if field.vis.is_accessible_from(def_scope, self.tcx) {
-                                self.apply_adjustments(base, adjustments);
-                                self.register_predicates(autoderef.into_obligations());
 
-                                self.tcx.check_stability(
-                                    field.did,
-                                    Some(expr.hir_id),
-                                    expr.span,
-                                    None,
-                                );
-                                return field_ty;
-                            }
-                            private_candidate = Some((adjustments, base_def.did()));
-                            break;
+                    let mut field_path = SmallVec::new();
+                    if self.find_adt_field(*base_def, ident, &mut field_path) {
+                        let (first_idx, _) = field_path[0];
+                        let (_, last_field) = field_path.last().unwrap();
+
+                        // Save the index of all fields regardless of their visibility in case
+                        // of error recovery.
+                        let nested_fields = field_path[..]
+                            .array_windows()
+                            .map(|[(_, outer), (inner_idx, _)]| {
+                                let outer_ty = self.field_ty(expr.span, outer, args);
+                                (outer_ty, *inner_idx)
+                            })
+                            .collect();
+                        self.write_field_index(expr.hir_id, first_idx, nested_fields);
+
+                        let adjustments = self.adjust_steps(&autoderef);
+                        if last_field.vis.is_accessible_from(def_scope, self.tcx) {
+                            self.apply_adjustments(base, adjustments);
+                            self.register_predicates(autoderef.into_obligations());
+
+                            self.tcx.check_stability(
+                                last_field.did,
+                                Some(expr.hir_id),
+                                expr.span,
+                                None,
+                            );
+                            return self.field_ty(expr.span, last_field, args);
                         }
-                        last_ty = Some(field_ty);
-                        adt_def = field_ty.ty_adt_def().expect("expect Adt for unnamed field");
+
+                        // The field is not accessible, fall through to error reporting.
+                        private_candidate = Some((adjustments, base_def.did()));
                     }
                 }
                 ty::Tuple(tys) => {
