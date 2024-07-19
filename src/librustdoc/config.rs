@@ -296,12 +296,11 @@ pub(crate) struct RenderOptions {
     pub(crate) read_rendered_cci: bool,
     /// If `true` (default) write the shared cross-crate information to the doc root
     pub(crate) write_rendered_cci: bool,
-    /// Copies these folders into our doc root.
+    /// Copies these externally documented crates into our doc root.
     pub(crate) include_rendered_docs: Vec<PathToDocSubdirectory>,
-    /// The location of the doc directory for externally located crates.
-    /// Absolute path ending in doc/.
+    /// Path to crate-info.json for external crates.
     pub(crate) parts_paths: Vec<PathToParts>,
-    /// Where to write the cross-crate information parts
+    /// Where to write crate-info.json.
     pub(crate) parts_out_dir: Option<PathToParts>,
 }
 
@@ -931,7 +930,7 @@ fn parse_extern_html_roots(
 #[derive(Clone, Debug)]
 pub(crate) struct PathToDocSubdirectory(pub PathBuf);
 
-/// Path to cci root, including doc.parts, but not the crate name
+/// Path to crate-info.json
 ///
 /// For example, `/home/user/project/target/doc.parts/<crate>/crate-info.json`.
 #[derive(Clone, Debug)]

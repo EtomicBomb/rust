@@ -322,6 +322,8 @@ impl CciPart for AllCratesPart {
 }
 impl PartsAndLocations<AllCratesPart> {
     fn get(crate_name_json: SortedJson) -> Result<Self, Error> {
+        // external hack_get_external_crate_names not needed here, because
+        // there's no way that we write the search index but not crates.js
         let path = PathBuf::from("crates.js");
         Ok(Self::with(path, crate_name_json))
     }
@@ -849,7 +851,7 @@ impl Serialize for AliasSerializableImpl {
 
 /// Create all parents
 fn create_parents(cx: &mut Context<'_>, path: &Path) -> Result<(), Error> {
-    let parent = path.parent().expect("trying to write to an empty path");
+    let parent = try_none!(path.parent(), path);
     // TODO: check cache for whether this directory has already been created
     try_err!(cx.shared.fs.create_dir_all(parent), parent);
     Ok(())
