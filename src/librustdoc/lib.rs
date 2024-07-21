@@ -631,7 +631,7 @@ fn opts() -> Vec<RustcOptGroup> {
             )
         }),
         unstable("include-rendered-docs", |o| {
-            o.optopt(
+            o.optmulti(
                 "",
                 "include-rendered-docs",
                 "Copies docs from an external crate to the --out-dir. Expects PATH to be a path directly

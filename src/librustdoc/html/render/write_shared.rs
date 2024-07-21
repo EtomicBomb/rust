@@ -285,7 +285,7 @@ impl<T, U: fmt::Display> fmt::Display for Part<T, U> {
 }
 
 /// Wrapper trait for `Part<T, U>`
-pub(crate) trait CciPart: Sized + fmt::Display + 'static {
+trait CciPart: Sized + fmt::Display + 'static {
     /// Identifies the kind of cross crate information.
     ///
     /// The cci type name in `doc.parts/<cci type>`
