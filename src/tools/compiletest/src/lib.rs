@@ -81,7 +81,6 @@ pub fn parse_config(args: Vec<String>) -> Config {
         .optopt("", "run", "whether to execute run-* tests", "auto | always | never")
         .optflag("", "ignored", "run tests marked as ignored")
         .optflag("", "with-debug-assertions", "whether to run tests with `ignore-debug` header")
-        .optflag("", "aux-write-doc-cci", "whether to write cci for auxiliary crates")
         .optmulti(
             "",
             "skip",
@@ -250,7 +249,6 @@ pub fn parse_config(args: Vec<String>) -> Config {
         debugger: None,
         run_ignored,
         with_debug_assertions,
-        aux_write_doc_cci: matches.opt_present("aux-write-doc-cci"),
         filters: matches.free.clone(),
         skip: matches.opt_strs("skip"),
         filter_exact: matches.opt_present("exact"),
