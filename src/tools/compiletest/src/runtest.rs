@@ -735,7 +735,7 @@ impl<'test> TestCx<'test> {
         self.maybe_add_external_args(&mut rustc, &self.config.target_rustcflags);
         rustc.args(&self.props.compile_flags);
 
-        self.compose_and_run_compiler(rustc, Some(src))
+        self.compose_and_run_compiler(&self.testpaths, rustc, Some(src))
     }
 
     fn run_debuginfo_test(&self) {
@@ -1591,14 +1591,14 @@ impl<'test> TestCx<'test> {
             passes,
         );
 
-        self.compose_and_run_compiler(rustc, None)
+        self.compose_and_run_compiler(&self.testpaths, rustc, None)
     }
 
     /// aux: whether we are building the aux docs or main docs
-    fn document(&self, out_dir: &Path) -> ProcRes {
+    fn document(&self, out_dir: &Path, of: &TestPaths) -> ProcRes {
         if self.props.build_aux_docs {
             for rel_ab in &self.props.aux_builds {
-                let aux_testpaths = self.compute_aux_test_paths(dbg!(&self.testpaths), dbg!(rel_ab));
+                let aux_testpaths = self.compute_aux_test_paths(of, rel_ab);
                 let aux_props =
                     self.props.from_aux_file(&aux_testpaths.file, self.revision, self.config);
                 let aux_cx = TestCx {
@@ -1609,12 +1609,7 @@ impl<'test> TestCx<'test> {
                 };
                 // Create the directory for the stdout/stderr files.
                 create_dir_all(aux_cx.output_base_dir()).unwrap();
-                let out_dir = if aux_props.unique_doc_aux_dir {
-                    out_dir.join("docs").join(rel_ab.trim_end_matches(".rs")).join("doc")
-                } else {
-                    out_dir.to_owned()
-                };
-                let auxres = aux_cx.document(&out_dir);
+                let auxres = aux_cx.document(&out_dir, of);
                 if !auxres.status.success() {
                     return auxres;
                 }
@@ -1625,14 +1620,28 @@ impl<'test> TestCx<'test> {
 
         let rustdoc_path = self.config.rustdoc_path.as_ref().expect("--rustdoc-path not passed");
 
+        let out_dir = if self.props.unique_doc_aux_dir {
+                let file_name = self.testpaths.file.file_name().expect("file name should not be empty")
+                    .to_str()
+                    .expect("file name utf8")
+                    .trim_end_matches(".rs");
+            let out_dir = out_dir.join("docs").join(file_name).join("doc");
+            create_dir_all(&out_dir).unwrap();
+            out_dir
+        } else {
+            out_dir.to_path_buf()
+        };
+
         let mut rustdoc = Command::new(rustdoc_path);
+        let current_dir = output_base_dir(self.config, of, self.safe_revision());
+        rustdoc.current_dir(current_dir);
         rustdoc
             .arg("-L")
             .arg(self.config.run_lib_path.to_str().unwrap())
             .arg("-L")
             .arg(aux_dir)
             .arg("-o")
-            .arg(out_dir)
+            .arg(&out_dir)
             .arg("--deny")
             .arg("warnings")
             .arg(&self.testpaths.file)
@@ -1649,7 +1658,7 @@ impl<'test> TestCx<'test> {
             rustdoc.arg(format!("-Clinker={}", linker));
         }
 
-        self.compose_and_run_compiler(rustdoc, None)
+        self.compose_and_run_compiler(of, rustdoc, None)
     }
 
     fn exec_compiled_test(&self) -> ProcRes {
@@ -1765,7 +1774,6 @@ impl<'test> TestCx<'test> {
     fn compute_aux_test_paths(&self, of: &TestPaths, rel_ab: &str) -> TestPaths {
         let test_ab =
             of.file.parent().expect("test file path has no parent").join("auxiliary").join(rel_ab);
-        dbg!(&of, rel_ab, &test_ab);
         if !test_ab.exists() {
             self.fatal(&format!("aux-build `{}` source not found", test_ab.display()))
         }
@@ -1848,9 +1856,9 @@ impl<'test> TestCx<'test> {
         }
     }
 
-    fn compose_and_run_compiler(&self, mut rustc: Command, input: Option<String>) -> ProcRes {
+    fn compose_and_run_compiler(&self, testpaths: &TestPaths, mut rustc: Command, input: Option<String>) -> ProcRes {
         let aux_dir = self.aux_output_dir();
-        self.build_all_auxiliary(&self.testpaths, &aux_dir, &mut rustc);
+        self.build_all_auxiliary(testpaths, &aux_dir, &mut rustc);
 
         rustc.envs(self.props.rustc_env.clone());
         self.props.unset_rustc_env.iter().fold(&mut rustc, Command::env_remove);
@@ -1870,7 +1878,7 @@ impl<'test> TestCx<'test> {
         aux_dir: &Path,
         is_bin: bool,
     ) -> AuxType {
-        let aux_testpaths = self.compute_aux_test_paths(dbg!(of), dbg!(source_path));
+        let aux_testpaths = self.compute_aux_test_paths(of, source_path);
         let aux_props = self.props.from_aux_file(&aux_testpaths.file, self.revision, self.config);
         let mut aux_dir = aux_dir.to_path_buf();
         if is_bin {
@@ -2041,7 +2049,7 @@ impl<'test> TestCx<'test> {
         let is_aux = input_file.components().map(|c| c.as_os_str()).any(|c| c == "auxiliary");
         let is_rustdoc = self.is_rustdoc() && !is_aux;
         let mut rustc = if !is_rustdoc {
-            Command::new(&self.config.rustc_path)
+            Command::new(dbg!(&self.config.rustc_path))
         } else {
             Command::new(&self.config.rustdoc_path.clone().expect("no rustdoc built yet"))
         };
@@ -2565,7 +2573,7 @@ impl<'test> TestCx<'test> {
             Vec::new(),
         );
 
-        let proc_res = self.compose_and_run_compiler(rustc, None);
+        let proc_res = self.compose_and_run_compiler(&self.testpaths, rustc, None);
         let output_path = self.get_filecheck_file("ll");
         (proc_res, output_path)
     }
@@ -2601,7 +2609,7 @@ impl<'test> TestCx<'test> {
             Vec::new(),
         );
 
-        let proc_res = self.compose_and_run_compiler(rustc, None);
+        let proc_res = self.compose_and_run_compiler(&self.testpaths, rustc, None);
         let output_path = self.get_filecheck_file("s");
         (proc_res, output_path)
     }
@@ -2684,7 +2692,7 @@ impl<'test> TestCx<'test> {
         let out_dir = self.output_base_dir();
         remove_and_create_dir_all(&out_dir);
 
-        let proc_res = self.document(&out_dir);
+        let proc_res = self.document(&out_dir, &self.testpaths);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
@@ -2743,7 +2751,7 @@ impl<'test> TestCx<'test> {
         let aux_dir = new_rustdoc.aux_output_dir();
         new_rustdoc.build_all_auxiliary(&new_rustdoc.testpaths, &aux_dir, &mut rustc);
 
-        let proc_res = new_rustdoc.document(&compare_dir);
+        let proc_res = new_rustdoc.document(&compare_dir, &new_rustdoc.testpaths);
         if !proc_res.status.success() {
             eprintln!("failed to run nightly rustdoc");
             return;
@@ -2866,7 +2874,7 @@ impl<'test> TestCx<'test> {
         let out_dir = self.output_base_dir();
         remove_and_create_dir_all(&out_dir);
 
-        let proc_res = self.document(&out_dir);
+        let proc_res = self.document(&out_dir, &self.testpaths);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
@@ -2942,28 +2950,27 @@ impl<'test> TestCx<'test> {
     fn check_rustdoc_test_option(&self, res: ProcRes) {
         let mut other_files = Vec::new();
         let mut files: HashMap<String, Vec<usize>> = HashMap::new();
-        let cwd = env::current_dir().unwrap();
-        files.insert(
-            self.testpaths
-                .file
-                .strip_prefix(&cwd)
-                .unwrap_or(&self.testpaths.file)
+        let testpath = fs::canonicalize(&self.testpaths.file)
+            .expect("failed to canonicalize");
+        let testpath = testpath
                 .to_str()
                 .unwrap()
-                .replace('\\', "/"),
+                .replace('\\', "/");
+        files.insert(
+            testpath,
             self.get_lines(&self.testpaths.file, Some(&mut other_files)),
         );
         for other_file in other_files {
             let mut path = self.testpaths.file.clone();
             path.set_file_name(&format!("{}.rs", other_file));
-            files.insert(
-                path.strip_prefix(&cwd).unwrap_or(&path).to_str().unwrap().replace('\\', "/"),
-                self.get_lines(&path, None),
-            );
+            let path = fs::canonicalize(path).expect("failed to canonicalize");
+            let normalized = path.to_str().unwrap().replace('\\', "/");
+            files.insert(normalized, self.get_lines(&path, None));
         }
 
         let mut tested = 0;
         for _ in res.stdout.split('\n').filter(|s| s.starts_with("test ")).inspect(|s| {
+            dbg!(&s);
             if let Some((left, right)) = s.split_once(" - ") {
                 let path = left.rsplit("test ").next().unwrap();
                 if let Some(ref mut v) = files.get_mut(&path.replace('\\', "/")) {
@@ -3796,7 +3803,7 @@ impl<'test> TestCx<'test> {
         if let Some(nodejs) = &self.config.nodejs {
             let out_dir = self.output_base_dir();
 
-            self.document(&out_dir);
+            self.document(&out_dir, &self.testpaths);
 
             let root = self.config.find_rust_src_root().unwrap();
             let file_stem =
@@ -4112,7 +4119,7 @@ impl<'test> TestCx<'test> {
                 rustc.arg(crate_name);
             }
 
-            let res = self.compose_and_run_compiler(rustc, None);
+            let res = self.compose_and_run_compiler(&self.testpaths, rustc, None);
             if !res.status.success() {
                 self.fatal_proc_rec("failed to compile fixed code", &res);
             }
