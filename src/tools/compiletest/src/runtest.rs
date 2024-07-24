@@ -729,7 +729,7 @@ impl<'test> TestCx<'test> {
         self.maybe_add_external_args(&mut rustc, &self.config.target_rustcflags);
         rustc.args(&self.props.compile_flags);
 
-        self.compose_and_run_compiler(rustc, Some(src), self.testpaths)
+        self.compose_and_run_compiler(rustc, Some(src))
     }
 
     fn run_debuginfo_test(&self) {
@@ -1585,15 +1585,13 @@ impl<'test> TestCx<'test> {
             passes,
         );
 
-        self.compose_and_run_compiler(rustc, None, self.testpaths)
+        self.compose_and_run_compiler(rustc, None)
     }
 
-    /// `root_out_dir` and `root_testpaths` refer to the parameters of the actual test being run.
-    /// Auxiliaries, no matter how deep, have the same root_out_dir and root_testpaths.
-    fn document(&self, root_out_dir: &Path, root_testpaths: &TestPaths) -> ProcRes {
+    fn document(&self, out_dir: &Path) -> ProcRes {
         if self.props.build_aux_docs {
             for rel_ab in &self.props.aux_builds {
-                let aux_testpaths = self.compute_aux_test_paths(root_testpaths, rel_ab);
+                let aux_testpaths = self.compute_aux_test_paths(&self.testpaths, rel_ab);
                 let aux_props =
                     self.props.from_aux_file(&aux_testpaths.file, self.revision, self.config);
                 let aux_cx = TestCx {
@@ -1604,7 +1602,7 @@ impl<'test> TestCx<'test> {
                 };
                 // Create the directory for the stdout/stderr files.
                 create_dir_all(aux_cx.output_base_dir()).unwrap();
-                let auxres = aux_cx.document(&root_out_dir, root_testpaths);
+                let auxres = aux_cx.document(out_dir);
                 if !auxres.status.success() {
                     return auxres;
                 }
@@ -1614,47 +1612,21 @@ impl<'test> TestCx<'test> {
         let aux_dir = self.aux_output_dir_name();
 
         let rustdoc_path = self.config.rustdoc_path.as_ref().expect("--rustdoc-path not passed");
-
-        // actual --out-dir given to the auxiliary or test, as opposed to the root out dir for the entire
-        // test
-        let out_dir: Cow<'_, Path> = if self.props.unique_doc_out_dir {
-            let file_name = self
-                .testpaths
-                .file
-                .file_name()
-                .expect("file name should not be empty")
-                .to_str()
-                .expect("file name utf8")
-                .trim_end_matches(".rs");
-            let out_dir = PathBuf::from_iter([
-                root_out_dir,
-                Path::new("docs"),
-                Path::new(file_name),
-                Path::new("doc"),
-            ]);
-            create_dir_all(&out_dir).unwrap();
-            Cow::Owned(out_dir)
-        } else {
-            Cow::Borrowed(root_out_dir)
-        };
-
         let mut rustdoc = Command::new(rustdoc_path);
-        let current_dir = output_base_dir(self.config, root_testpaths, self.safe_revision());
-        rustdoc.current_dir(current_dir);
+
         rustdoc
             .arg("-L")
             .arg(self.config.run_lib_path.to_str().unwrap())
             .arg("-L")
             .arg(aux_dir)
             .arg("-o")
-            .arg(out_dir.as_ref())
+            .arg(out_dir)
             .arg("--deny")
             .arg("warnings")
             .arg(&self.testpaths.file)
             .arg("-A")
             .arg("internal_features")
-            .args(&self.props.compile_flags)
-            .args(&self.props.doc_flags);
+            .args(&self.props.compile_flags);
 
         if self.config.mode == RustdocJson {
             rustdoc.arg("--output-format").arg("json").arg("-Zunstable-options");
@@ -1664,7 +1636,7 @@ impl<'test> TestCx<'test> {
             rustdoc.arg(format!("-Clinker={}", linker));
         }
 
-        self.compose_and_run_compiler(rustdoc, None, root_testpaths)
+        self.compose_and_run_compiler(rustdoc, None)
     }
 
     fn exec_compiled_test(&self) -> ProcRes {
@@ -1862,16 +1834,9 @@ impl<'test> TestCx<'test> {
         }
     }
 
-    /// `root_testpaths` refers to the path of the original test.
-    /// the auxiliary and the test with an aux-build have the same `root_testpaths`.
-    fn compose_and_run_compiler(
-        &self,
-        mut rustc: Command,
-        input: Option<String>,
-        root_testpaths: &TestPaths,
-    ) -> ProcRes {
+    fn compose_and_run_compiler(&self, mut rustc: Command, input: Option<String>) -> ProcRes {
         let aux_dir = self.aux_output_dir();
-        self.build_all_auxiliary(root_testpaths, &aux_dir, &mut rustc);
+        self.build_all_auxiliary(&self.testpaths, &aux_dir, &mut rustc);
 
         rustc.envs(self.props.rustc_env.clone());
         self.props.unset_rustc_env.iter().fold(&mut rustc, Command::env_remove);
@@ -2586,7 +2551,7 @@ impl<'test> TestCx<'test> {
             Vec::new(),
         );
 
-        let proc_res = self.compose_and_run_compiler(rustc, None, self.testpaths);
+        let proc_res = self.compose_and_run_compiler(rustc, None);
         let output_path = self.get_filecheck_file("ll");
         (proc_res, output_path)
     }
@@ -2622,7 +2587,7 @@ impl<'test> TestCx<'test> {
             Vec::new(),
         );
 
-        let proc_res = self.compose_and_run_compiler(rustc, None, self.testpaths);
+        let proc_res = self.compose_and_run_compiler(rustc, None);
         let output_path = self.get_filecheck_file("s");
         (proc_res, output_path)
     }
@@ -2705,7 +2670,7 @@ impl<'test> TestCx<'test> {
         let out_dir = self.output_base_dir();
         remove_and_create_dir_all(&out_dir);
 
-        let proc_res = self.document(&out_dir, &self.testpaths);
+        let proc_res = self.document(&out_dir);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
@@ -2764,7 +2729,7 @@ impl<'test> TestCx<'test> {
         let aux_dir = new_rustdoc.aux_output_dir();
         new_rustdoc.build_all_auxiliary(&new_rustdoc.testpaths, &aux_dir, &mut rustc);
 
-        let proc_res = new_rustdoc.document(&compare_dir, &new_rustdoc.testpaths);
+        let proc_res = new_rustdoc.document(&compare_dir);
         if !proc_res.status.success() {
             eprintln!("failed to run nightly rustdoc");
             return;
@@ -2887,7 +2852,7 @@ impl<'test> TestCx<'test> {
         let out_dir = self.output_base_dir();
         remove_and_create_dir_all(&out_dir);
 
-        let proc_res = self.document(&out_dir, &self.testpaths);
+        let proc_res = self.document(&out_dir);
         if !proc_res.status.success() {
             self.fatal_proc_rec("rustdoc failed!", &proc_res);
         }
@@ -2963,15 +2928,24 @@ impl<'test> TestCx<'test> {
     fn check_rustdoc_test_option(&self, res: ProcRes) {
         let mut other_files = Vec::new();
         let mut files: HashMap<String, Vec<usize>> = HashMap::new();
-        let normalized = fs::canonicalize(&self.testpaths.file).expect("failed to canonicalize");
-        let normalized = normalized.to_str().unwrap().replace('\\', "/");
-        files.insert(normalized, self.get_lines(&self.testpaths.file, Some(&mut other_files)));
+        let cwd = env::current_dir().unwrap();
+        files.insert(
+            self.testpaths
+                .file
+                .strip_prefix(&cwd)
+                .unwrap_or(&self.testpaths.file)
+                .to_str()
+                .unwrap()
+                .replace('\\', "/"),
+            self.get_lines(&self.testpaths.file, Some(&mut other_files)),
+        );
         for other_file in other_files {
             let mut path = self.testpaths.file.clone();
             path.set_file_name(&format!("{}.rs", other_file));
-            let path = fs::canonicalize(path).expect("failed to canonicalize");
-            let normalized = path.to_str().unwrap().replace('\\', "/");
-            files.insert(normalized, self.get_lines(&path, None));
+            files.insert(
+                path.strip_prefix(&cwd).unwrap_or(&path).to_str().unwrap().replace('\\', "/"),
+                self.get_lines(&path, None),
+            );
         }
 
         let mut tested = 0;
@@ -3810,7 +3784,7 @@ impl<'test> TestCx<'test> {
         if let Some(nodejs) = &self.config.nodejs {
             let out_dir = self.output_base_dir();
 
-            self.document(&out_dir, &self.testpaths);
+            self.document(&out_dir);
 
             let root = self.config.find_rust_src_root().unwrap();
             let file_stem =
@@ -4126,7 +4100,7 @@ impl<'test> TestCx<'test> {
                 rustc.arg(crate_name);
             }
 
-            let res = self.compose_and_run_compiler(rustc, None, self.testpaths);
+            let res = self.compose_and_run_compiler(rustc, None);
             if !res.status.success() {
                 self.fatal_proc_rec("failed to compile fixed code", &res);
             }
