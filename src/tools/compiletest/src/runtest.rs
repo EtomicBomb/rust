@@ -2970,9 +2970,9 @@ impl<'test> TestCx<'test> {
     fn check_rustdoc_test_option(&self, res: ProcRes) {
         let mut other_files = Vec::new();
         let mut files: HashMap<String, Vec<usize>> = HashMap::new();
-        let testpath = fs::canonicalize(&self.testpaths.file).expect("failed to canonicalize");
-        let testpath = testpath.to_str().unwrap().replace('\\', "/");
-        files.insert(testpath, self.get_lines(&self.testpaths.file, Some(&mut other_files)));
+        let normalized = fs::canonicalize(&self.testpaths.file).expect("failed to canonicalize");
+        let normalized = normalized.to_str().unwrap().replace('\\', "/");
+        files.insert(normalized, self.get_lines(&self.testpaths.file, Some(&mut other_files)));
         for other_file in other_files {
             let mut path = self.testpaths.file.clone();
             path.set_file_name(&format!("{}.rs", other_file));
