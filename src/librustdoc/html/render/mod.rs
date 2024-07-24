@@ -31,6 +31,8 @@ mod tests;
 mod context;
 mod print_item;
 mod sidebar;
+mod sorted_json;
+mod sorted_template;
 mod span_map;
 mod type_layout;
 mod write_shared;
