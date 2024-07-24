@@ -1,8 +1,8 @@
-use serde_json::Value;
-use serde::{Serialize, Deserialize};
-use std::fmt;
-use std::borrow::Borrow;
 use itertools::Itertools as _;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::borrow::Borrow;
+use std::fmt;
 
 /// Prerenedered json.
 ///
@@ -24,14 +24,17 @@ impl SortedJson {
     }
 
     /// Serializes and sorts
-    pub(crate) fn array<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
-        let items = items.into_iter()
+    pub(crate) fn array<T: Borrow<SortedJson>, I: IntoIterator<Item = T>>(items: I) -> Self {
+        let items = items
+            .into_iter()
             .sorted_unstable_by(|a, b| a.borrow().cmp(&b.borrow()))
             .format_with(",", |item, f| f(item.borrow()));
         SortedJson(format!("[{}]", items))
     }
 
-    pub(crate) fn array_unsorted<T: Borrow<SortedJson>, I: IntoIterator<Item=T>>(items: I) -> Self {
+    pub(crate) fn array_unsorted<T: Borrow<SortedJson>, I: IntoIterator<Item = T>>(
+        items: I,
+    ) -> Self {
         let items = items.into_iter().format_with(",", |item, f| f(item.borrow()));
         SortedJson(format!("[{items}]"))
     }
@@ -55,6 +58,29 @@ impl From<SortedJson> for Value {
     }
 }
 
+/// For use in JSON.parse('{...}').
+///
+/// JSON.parse supposedly loads faster than raw JS source,
+/// so this is used for large objects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EscapedJson(SortedJson);
+
+impl From<SortedJson> for EscapedJson {
+    fn from(json: SortedJson) -> Self {
+        EscapedJson(json)
+    }
+}
+
+impl fmt::Display for EscapedJson {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // All these `replace` calls are because we have to go through JS string
+        // for JSON content.
+        // We need to escape double quotes for the JSON
+        let json = self.0.0.replace('\\', r"\\").replace('\'', r"\'").replace("\\\"", "\\\\\"");
+        write!(f, "{}", json)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +100,48 @@ mod tests {
 
         assert_eq!(json.to_string(), serialized);
         assert_eq!(serde_json::to_string(&json).unwrap(), serialized);
+    }
+
+    #[test]
+    fn escape_json_number() {
+        let json = SortedJson::serialize(3);
+        let json = EscapedJson::from(json);
+        assert_eq!(format!("{json}"), "3");
+    }
+
+    #[test]
+    fn escape_json_single_quote() {
+        let json = SortedJson::serialize("he's");
+        let json = EscapedJson::from(json);
+        assert_eq!(dbg!(format!("{json}")), r#""he\'s""#);
+    }
+
+    #[test]
+    fn escape_json_array() {
+        let json = SortedJson::serialize([1,2,3]);
+        let json = EscapedJson::from(json);
+        assert_eq!(dbg!(format!("{json}")), r#"[1,2,3]"#);
+    }
+
+    #[test]
+    fn escape_json_string() {
+        let json = SortedJson::serialize(r#"he"llo"#);
+        let json = EscapedJson::from(json);
+        assert_eq!(dbg!(format!("{json}")), r#""he\\\"llo""#);
+    }
+
+    #[test]
+    fn escape_json_string_escaped() {
+        let json = SortedJson::serialize(r#"he\"llo"#);
+        let json = EscapedJson::from(json);
+        assert_eq!(format!("{json}"), r#""he\\\\\\\"llo""#);
+    }
+
+    #[test]
+    fn escape_json_string_escaped_escaped() {
+        let json = SortedJson::serialize(r#"he\\"llo"#);
+        let json = EscapedJson::from(json);
+        assert_eq!(format!("{json}"), r#""he\\\\\\\\\\\"llo""#);
     }
 
     #[test]
@@ -100,7 +168,7 @@ mod tests {
     #[test]
     fn serialize_array() {
         let json = SortedJson::serialize([3, 1, 2]);
-        let serialized =  "[3,1,2]";
+        let serialized = "[3,1,2]";
         check(json, serialized);
     }
 

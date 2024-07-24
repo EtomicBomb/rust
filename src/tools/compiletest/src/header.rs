@@ -126,7 +126,7 @@ pub struct TestProps {
     // Build documentation for all specified aux-builds as well
     pub build_aux_docs: bool,
     // Build the documentation for each crate in a unique output directory
-    pub unique_doc_aux_dir: bool,
+    pub unique_doc_out_dir: bool,
     // Flag to force a crate to be built with the host architecture
     pub force_host: bool,
     // Check stdout for error-pattern output as well as stderr
@@ -228,7 +228,7 @@ mod directives {
     pub const DOC_FLAGS: &'static str = "doc-flags";
     pub const SHOULD_ICE: &'static str = "should-ice";
     pub const BUILD_AUX_DOCS: &'static str = "build-aux-docs";
-    pub const UNIQUE_DOC_OUT_DIR: &'static str = "unique-doc-aux-dir";
+    pub const UNIQUE_DOC_OUT_DIR: &'static str = "unique-doc-out-dir";
     pub const FORCE_HOST: &'static str = "force-host";
     pub const CHECK_STDOUT: &'static str = "check-stdout";
     pub const CHECK_RUN_RESULTS: &'static str = "check-run-results";
@@ -289,7 +289,7 @@ impl TestProps {
             exec_env: vec![],
             unset_exec_env: vec![],
             build_aux_docs: false,
-            unique_doc_aux_dir: false,
+            unique_doc_out_dir: false,
             force_host: false,
             check_stdout: false,
             check_run_results: false,
@@ -386,12 +386,7 @@ impl TestProps {
                         |r| r,
                     );
 
-                    config.push_name_value_directive(
-                        ln,
-                        DOC_FLAGS,
-                        &mut self.doc_flags,
-                        |r| r,
-                    );
+                    config.push_name_value_directive(ln, DOC_FLAGS, &mut self.doc_flags, |r| r);
 
                     fn split_flags(flags: &str) -> Vec<String> {
                         // Individual flags can be single-quoted to preserve spaces; see
@@ -430,7 +425,7 @@ impl TestProps {
 
                     config.set_name_directive(ln, SHOULD_ICE, &mut self.should_ice);
                     config.set_name_directive(ln, BUILD_AUX_DOCS, &mut self.build_aux_docs);
-                    config.set_name_directive(ln, UNIQUE_DOC_OUT_DIR, &mut self.unique_doc_aux_dir);
+                    config.set_name_directive(ln, UNIQUE_DOC_OUT_DIR, &mut self.unique_doc_out_dir);
 
                     config.set_name_directive(ln, FORCE_HOST, &mut self.force_host);
                     config.set_name_directive(ln, CHECK_STDOUT, &mut self.check_stdout);

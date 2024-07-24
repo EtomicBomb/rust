@@ -297,7 +297,7 @@ pub(crate) struct RenderOptions {
     /// If `true` (default) write the shared cross-crate information to the doc root
     pub(crate) write_rendered_cci: bool,
     /// Copies these externally documented crates into our doc root.
-    pub(crate) include_rendered_docs: Vec<PathToDocSubdirectory>,
+    pub(crate) include_rendered_docs: Vec<PathToDocRoot>,
     /// Path to crate-info.json for external crates.
     pub(crate) parts_paths: Vec<PathToParts>,
     /// Where to write crate-info.json.
@@ -506,10 +506,14 @@ impl Options {
             Err(err) => dcx.fatal(err),
         };
 
-        let include_rendered_docs = matches.opt_strs("include-rendered-docs").into_iter()
-            .map(|p| PathToDocSubdirectory(PathBuf::from(p)))
+        let include_rendered_docs = matches
+            .opt_strs("include-rendered-docs")
+            .into_iter()
+            .map(|p| PathToDocRoot(PathBuf::from(p)))
             .collect();
-        let parts_paths = matches.opt_strs("include-info-json").into_iter()
+        let parts_paths = matches
+            .opt_strs("include-info-json")
+            .into_iter()
             .map(|path| PathToParts(PathBuf::from(path)))
             .collect();
 
@@ -757,7 +761,8 @@ impl Options {
             Ok(result) => result,
             Err(e) => dcx.fatal(format!("could not parse --merge: {e}")),
         };
-        let parts_out_dir = matches.opt_str("write-info-json").map(|p| PathToParts(PathBuf::from(p)));
+        let parts_out_dir =
+            matches.opt_str("write-info-json").map(|p| PathToParts(PathBuf::from(p)));
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -926,9 +931,9 @@ fn parse_extern_html_roots(
     Ok(externs)
 }
 
-/// Path to the doc subdirectory for a specific crate, for example `target/doc/serde_json`.
+/// Path to the doc root for a specific crate, for example `target/doc/serde_json`.
 #[derive(Clone, Debug)]
-pub(crate) struct PathToDocSubdirectory(pub PathBuf);
+pub(crate) struct PathToDocRoot(pub PathBuf);
 
 /// Path to crate-info.json
 ///
@@ -952,7 +957,9 @@ fn parse_merge(matches: &getopts::Matches) -> Result<ShouldMerge, &'static str> 
         None => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
         Some("read-write") => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
         Some("none") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: false }),
-        Some("write-only") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: true }),
+        Some("write-only") => {
+            Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: true })
+        }
         Some(_) => Err("argument to --merge must be `read-write`, `none`, or `write-only`"),
     }
 }

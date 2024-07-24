@@ -634,8 +634,8 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optmulti(
                 "",
                 "include-rendered-docs",
-                "Copies docs from an external crate to the --out-dir. Expects PATH to be a path directly
-                to the external crate's subdirectory in its doc root.",
+                "Copies docs from an external crate to the current --out-dir. Expects PATH to be a path directly
+                to the external crate's doc root (was provided as the --out-dir when documenting it).",
                 "PATH",
             )
         }),

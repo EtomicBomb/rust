@@ -1,11 +1,13 @@
-use std::io::{Error, Result, ErrorKind};
-use std::path::PathBuf;
 use std::fs;
+use std::io::{Error, ErrorKind, Result};
+use std::path::PathBuf;
 
 /// Recursively copies the contents of the directory `src` to the directory `dst`.
 /// Analogous to `cp -rf src/* dst` and Python's `shutil.copytree`
 ///
 /// Creates all directories needed to perform the copy.
+///
+/// Will overwrite files in the output directory.
 pub(crate) fn copy_dir_all<S: Into<PathBuf>, D: Into<PathBuf>>(src: S, dst: D) -> Result<()> {
     copy_dir_all_mono(src.into(), dst.into())
 }
@@ -15,18 +17,24 @@ fn copy_dir_all_mono(src: PathBuf, dst: PathBuf) -> Result<()> {
     let mut dirs: Vec<(PathBuf, PathBuf)> = Vec::default();
 
     if !src.is_dir() {
-        return Err(Error::new(ErrorKind::Other, format!("src path `{src:?}` should be a directory")));
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("src path `{src:?}` should be a directory"),
+        ));
     }
     if !dst.is_dir() {
-        return Err(Error::new(ErrorKind::Other, format!("dst path `{dst:?}` should be a directory")));
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("dst path `{dst:?}` should be a directory"),
+        ));
     }
 
     dirs.push((src, dst));
 
     while let Some((src, dst)) = dirs.pop() {
         match fs::create_dir(&dst) {
-            Ok(()) => {},
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {},
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
 
@@ -50,10 +58,10 @@ fn copy_dir_all_mono(src: PathBuf, dst: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::copy_dir_all;
-    use tempfile::TempDir;
+    use std::fs;
     use std::io::Result;
     use std::path::Path;
-    use std::fs;
+    use tempfile::TempDir;
 
     fn create_paths(root: &Path, paths: &[&str]) -> Result<()> {
         for path in paths {

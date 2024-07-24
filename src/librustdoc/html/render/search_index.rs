@@ -17,8 +17,8 @@ use crate::formats::cache::{Cache, OrphanImplItem};
 use crate::formats::item_type::ItemType;
 use crate::html::format::join_with_double_colon;
 use crate::html::markdown::short_markdown_summary;
-use crate::html::render::{self, IndexItem, IndexItemFunctionType, RenderType, RenderTypeId};
 use crate::html::render::sorted_json::SortedJson;
+use crate::html::render::{self, IndexItem, IndexItemFunctionType, RenderType, RenderTypeId};
 
 use encode::{bitmap_to_string, write_vlqhex_to_string};
 

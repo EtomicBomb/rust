@@ -28,15 +28,15 @@ pub(crate) mod search_index;
 #[cfg(test)]
 mod tests;
 
-mod copy_dir;
 mod context;
+mod copy_dir;
 mod print_item;
 mod sidebar;
+mod sorted_json;
+mod sorted_template;
 mod span_map;
 mod type_layout;
 mod write_shared;
-mod sorted_json;
-mod sorted_template;
 
 pub(crate) use self::context::*;
 pub(crate) use self::span_map::{collect_spans_and_sources, LinkFromSrc};

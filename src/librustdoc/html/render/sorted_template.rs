@@ -1,9 +1,9 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::marker::PhantomData;
-use std::collections::BTreeSet;
 use std::str::FromStr;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Append-only templates for sorted, deduplicated lists of items.
 ///

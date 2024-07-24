@@ -12,9 +12,9 @@ use rustc_session::Session;
 use rustc_span::edition::Edition;
 use rustc_span::{sym, FileName, Symbol};
 
+use super::copy_dir::copy_dir_all;
 use super::print_item::{full_path, item_path, print_item};
-use super::write_shared::{write_shared};
-use super::copy_dir::{copy_dir_all};
+use super::write_shared::write_shared;
 use super::{
     collect_spans_and_sources, scrape_examples_help,
     sidebar::print_sidebar,

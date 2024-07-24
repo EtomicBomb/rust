@@ -9,7 +9,7 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "aux-codegen-backend",
     "aux-crate",
     "build-aux-docs",
-    "unique-doc-aux-dir",
+    "unique-doc-out-dir",
     "build-fail",
     "build-pass",
     "check-fail",
