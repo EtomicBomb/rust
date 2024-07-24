@@ -399,8 +399,6 @@ impl CciPart for CratesIndexPart {
 
 impl CratesIndexPart {
     fn blank_template(cx: &Context<'_>) -> SortedTemplate<<Self as CciPart>::FileFormat> {
-        // users are being naughty if they have this
-        const MAGIC: &str = "\u{FFFC}";
         let page = layout::Page {
             title: "Index of crates",
             css_class: "mod sys",
@@ -412,12 +410,13 @@ impl CratesIndexPart {
         };
         let layout = &cx.shared.layout;
         let style_files = &cx.shared.style_files;
+        const MAGIC: &str = "\u{FFFC}"; // users are being naughty if they have this
         let content = format!("<h1>List of all crates</h1><ul class=\"all-items\">{MAGIC}</ul>");
         let template = layout::render(layout, &page, "", content, &style_files);
         match SortedTemplate::magic(&template, MAGIC) {
             Ok(template) => template,
-            Err(_) => panic!(
-                "Object Replacement Character (U+FFFC) should not appear in your --index-page"
+            Err(e) => panic!(
+                "{e}: Object Replacement Character (U+FFFC) should not appear in the --index-page"
             ),
         }
     }

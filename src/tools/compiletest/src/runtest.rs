@@ -1869,6 +1869,8 @@ impl<'test> TestCx<'test> {
         }
     }
 
+    /// `root_testpaths` refers to the path of the original test.
+    /// the auxiliary and the test with an aux-build have the same `root_testpaths`.
     fn compose_and_run_compiler(
         &self,
         mut rustc: Command,
