@@ -60,7 +60,9 @@ impl From<SortedJson> for Value {
 
 /// For use in JSON.parse('{...}').
 ///
-/// JSON.parse supposedly loads faster than raw JS source,
+/// Assumes we are going to be wrapped in single quoted strings.
+///
+/// JSON.parse loads faster than raw JS source,
 /// so this is used for large objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EscapedJson(SortedJson);

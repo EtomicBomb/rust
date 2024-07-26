@@ -17,8 +17,7 @@ fn check(json: SortedJson, serialized: &str) {
     assert_eq!(serde_json::to_string(&json).unwrap(), serialized);
 }
 
-// Test this basic are needed because we are testing that our Display impl + serialize impl don't
-// nest everything in extra level of string. We also are testing round trip.
+// Make sure there is no extra level of string, plus number of escapes.
 #[test]
 fn escape_json_number() {
     let json = SortedJson::serialize(3);
@@ -61,6 +60,7 @@ fn escape_json_string_escaped_escaped() {
     assert_eq!(format!("{json}"), r#""he\\\\\\\\\\\"llo""#);
 }
 
+// Testing round trip + making sure there is no extra level of string
 #[test]
 fn number() {
     let json = SortedJson::serialize(3);
