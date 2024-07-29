@@ -14,11 +14,7 @@ use rustc_span::edition::Edition;
 use rustc_span::{sym, FileName, Symbol};
 
 use super::print_item::{full_path, item_path, print_item};
-<<<<<<< HEAD
-use super::search_index::build_index;
 use super::sidebar::{print_sidebar, sidebar_module_like, Sidebar};
-=======
->>>>>>> 164844f3f807 (initial implementation of mergable rustdoc cci)
 use super::write_shared::write_shared;
 use super::{collect_spans_and_sources, scrape_examples_help, AllTypes, LinkFromSrc, StylePath};
 use crate::clean::types::ExternalLocation;

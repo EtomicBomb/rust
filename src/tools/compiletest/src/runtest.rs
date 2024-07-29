@@ -1,11 +1,5 @@
 // ignore-tidy-filelength
 
-use crate::read2::{read2_abbreviated, Truncated};
-use crate::util::{add_dylib_path, copy_dir_all, dylib_env_var, logv, static_regex, PathBufExt};
-use colored::Colorize;
-use miropt_test_tools::{files_for_miropt_test, MiroptTest, MiroptTestFile};
-use regex::{Captures, Regex};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, create_dir_all, File, OpenOptions};

@@ -1,9 +1,9 @@
-use itertools::{Itertools as _, Position};
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+use itertools::{Itertools as _, Position};
 use serde::{Deserialize, Serialize};
 
 /// Append-only templates for sorted, deduplicated lists of items.

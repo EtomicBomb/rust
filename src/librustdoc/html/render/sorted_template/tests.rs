@@ -1,5 +1,6 @@
-use super::super::sorted_template::*;
 use std::str::FromStr;
+
+use super::super::sorted_template::*;
 
 fn is_comment_js(s: &str) -> bool {
     s.starts_with("//")

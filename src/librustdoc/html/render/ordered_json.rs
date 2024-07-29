@@ -1,8 +1,9 @@
+use std::borrow::Borrow;
+use std::fmt;
+
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::borrow::Borrow;
-use std::fmt;
 
 /// Prerenedered json.
 ///
