@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use super::{collect_paths_for_type, ensure_trailing_slash, Context, RenderMode};
 use crate::clean::{Crate, Item, ItemId, ItemKind};
-use crate::config::{EmitType, RenderOptions};
+use crate::config::{EmitType, PathToParts, RenderOptions, ShouldMerge};
 use crate::docfs::PathError;
 use crate::error::Error;
 use crate::formats::cache::Cache;
@@ -77,6 +77,7 @@ pub(crate) fn write_shared(
     let crate_name_json = OrderedJson::serialize(crate_name).unwrap(); // "rand"
     let external_crates = hack_get_external_crate_names(&cx.dst)?;
     let info = CrateInfo {
+        version: CrateInfoVersion::V1,
         src_files_js: SourcesPart::get(cx, &crate_name_json)?,
         search_index_js: SearchIndexPart::get(index, &cx.shared.resource_suffix)?,
         all_crates: AllCratesPart::get(crate_name_json.clone())?,
@@ -85,33 +86,51 @@ pub(crate) fn write_shared(
         type_impl: TypeAliasPart::get(cx, krate, &crate_name_json)?,
     };
 
-    let crates = vec![info]; // we have info from just one crate. rest will found in out dir
-
-    write_static_files(cx, &opt)?;
-    let dst = &cx.dst;
-    if opt.emit.is_empty() || opt.emit.contains(&EmitType::InvocationSpecific) {
-        if cx.include_sources {
-            write_rendered_cci::<SourcesPart, _>(SourcesPart::blank, dst, &crates)?;
-        }
-        write_rendered_cci::<SearchIndexPart, _>(SearchIndexPart::blank, dst, &crates)?;
-        write_rendered_cci::<AllCratesPart, _>(AllCratesPart::blank, dst, &crates)?;
+    if let Some(parts_out_dir) = &opt.parts_out_dir {
+        create_parents(&parts_out_dir.0)?;
+        try_err!(
+            fs::write(&parts_out_dir.0, serde_json::to_string(&info).unwrap()),
+            &parts_out_dir.0
+        );
     }
-    write_rendered_cci::<TraitAliasPart, _>(TraitAliasPart::blank, dst, &crates)?;
-    write_rendered_cci::<TypeAliasPart, _>(TypeAliasPart::blank, dst, &crates)?;
-    match &opt.index_page {
-        Some(index_page) if opt.enable_index_page => {
-            let mut md_opts = opt.clone();
-            md_opts.output = cx.dst.clone();
-            md_opts.external_html = cx.shared.layout.external_html.clone();
-            try_err!(
-                crate::markdown::render(&index_page, md_opts, cx.shared.edition()),
-                &index_page
-            );
+
+    let mut crates = CrateInfo::read_many(&opt.include_parts_dir)?;
+    crates.push(info);
+
+    let m = &opt.should_merge;
+
+    if m.write_rendered_cci {
+        write_static_files(cx, &opt)?;
+        let dst = &cx.dst;
+        if opt.emit.is_empty() || opt.emit.contains(&EmitType::InvocationSpecific) {
+            if cx.include_sources {
+                write_rendered_cci::<SourcesPart, _>(SourcesPart::blank, dst, &crates, m)?;
+            }
+            write_rendered_cci::<SearchIndexPart, _>(SearchIndexPart::blank, dst, &crates, m)?;
+            write_rendered_cci::<AllCratesPart, _>(AllCratesPart::blank, dst, &crates, m)?;
         }
-        None if opt.enable_index_page => {
-            write_rendered_cci::<CratesIndexPart, _>(|| CratesIndexPart::blank(cx), dst, &crates)?;
+        write_rendered_cci::<TraitAliasPart, _>(TraitAliasPart::blank, dst, &crates, m)?;
+        write_rendered_cci::<TypeAliasPart, _>(TypeAliasPart::blank, dst, &crates, m)?;
+        match &opt.index_page {
+            Some(index_page) if opt.enable_index_page => {
+                let mut md_opts = opt.clone();
+                md_opts.output = cx.dst.clone();
+                md_opts.external_html = cx.shared.layout.external_html.clone();
+                try_err!(
+                    crate::markdown::render(&index_page, md_opts, cx.shared.edition()),
+                    &index_page
+                );
+            }
+            None if opt.enable_index_page => {
+                write_rendered_cci::<CratesIndexPart, _>(
+                    || CratesIndexPart::blank(cx),
+                    dst,
+                    &crates,
+                    m,
+                )?;
+            }
+            _ => {} // they don't want an index page
         }
-        _ => {} // they don't want an index page
     }
 
     Rc::get_mut(&mut cx.shared).unwrap().fs.set_sync_only(false);
@@ -187,12 +206,40 @@ fn write_search_desc(
 /// Contains pre-rendered contents to insert into the CCI template
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct CrateInfo {
+    version: CrateInfoVersion,
     src_files_js: PartsAndLocations<SourcesPart>,
     search_index_js: PartsAndLocations<SearchIndexPart>,
     all_crates: PartsAndLocations<AllCratesPart>,
     crates_index: PartsAndLocations<CratesIndexPart>,
     trait_impl: PartsAndLocations<TraitAliasPart>,
     type_impl: PartsAndLocations<TypeAliasPart>,
+}
+
+impl CrateInfo {
+    /// Read all of the crate info from its location on the filesystem
+    fn read_many(parts_paths: &[PathToParts]) -> Result<Vec<Self>, Error> {
+        parts_paths
+            .iter()
+            .map(|parts_path| {
+                let path = &parts_path.0;
+                let parts = try_err!(fs::read(&path), &path);
+                let parts: CrateInfo = try_err!(serde_json::from_slice(&parts), &path);
+                Ok::<_, Error>(parts)
+            })
+            .collect::<Result<Vec<CrateInfo>, Error>>()
+    }
+}
+
+/// Version for the format of the crate-info file.
+///
+/// This enum should only ever have one variant, representing the current version.
+/// Gives pretty good error message about expecting the current version on deserialize.
+///
+/// Must be incremented (V2, V3, etc.) upon any changes to the search index or CrateInfo,
+/// to provide better diagnostics about including an invalid file.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+enum CrateInfoVersion {
+    V1,
 }
 
 /// Paths (relative to the doc root) and their pre-merge contents
@@ -894,10 +941,14 @@ fn create_parents(path: &Path) -> Result<(), Error> {
 fn read_template_or_blank<F, T: FileFormat>(
     mut make_blank: F,
     path: &Path,
+    should_merge: &ShouldMerge,
 ) -> Result<SortedTemplate<T>, Error>
 where
     F: FnMut() -> SortedTemplate<T>,
 {
+    if !should_merge.read_rendered_cci {
+        return Ok(make_blank());
+    }
     match fs::read_to_string(&path) {
         Ok(template) => Ok(try_err!(SortedTemplate::from_str(&template), &path)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(make_blank()),
@@ -910,6 +961,7 @@ fn write_rendered_cci<T: CciPart, F>(
     mut make_blank: F,
     dst: &Path,
     crates_info: &[CrateInfo],
+    should_merge: &ShouldMerge,
 ) -> Result<(), Error>
 where
     F: FnMut() -> SortedTemplate<T::FileFormat>,
@@ -918,7 +970,8 @@ where
     for (path, parts) in get_path_parts::<T>(dst, crates_info) {
         create_parents(&path)?;
         // read previous rendered cci from storage, append to them
-        let mut template = read_template_or_blank::<_, T::FileFormat>(&mut make_blank, &path)?;
+        let mut template =
+            read_template_or_blank::<_, T::FileFormat>(&mut make_blank, &path, should_merge)?;
         for part in parts {
             template.append(part);
         }

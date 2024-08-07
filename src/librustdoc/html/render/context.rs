@@ -20,7 +20,7 @@ use super::{collect_spans_and_sources, scrape_examples_help, AllTypes, LinkFromS
 use crate::clean::types::ExternalLocation;
 use crate::clean::utils::has_doc_flag;
 use crate::clean::{self, ExternalCrate};
-use crate::config::{ModuleSorting, RenderOptions};
+use crate::config::{ModuleSorting, RenderOptions, ShouldMerge};
 use crate::docfs::{DocFS, PathError};
 use crate::error::Error;
 use crate::formats::cache::Cache;
@@ -127,8 +127,10 @@ pub(crate) struct SharedContext<'tcx> {
     pub(crate) span_correspondence_map: FxHashMap<rustc_span::Span, LinkFromSrc>,
     /// The [`Cache`] used during rendering.
     pub(crate) cache: Cache,
-
     pub(crate) call_locations: AllCallLocations,
+    /// Controls whether we read / write to cci files in the doc root. Defaults read=true,
+    /// write=true
+    should_merge: ShouldMerge,
 }
 
 impl SharedContext<'_> {
@@ -550,6 +552,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
             span_correspondence_map: matches,
             cache,
             call_locations,
+            should_merge: options.should_merge,
         };
 
         let dst = output;
@@ -637,92 +640,96 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         );
         shared.fs.write(final_file, v)?;
 
-        // Generating settings page.
-        page.title = "Settings";
-        page.description = "Settings of Rustdoc";
-        page.root_path = "./";
-        page.rust_logo = true;
+        // if to avoid writing help, settings files to doc root unless we're on the final invocation
+        if shared.should_merge.write_rendered_cci {
+            // Generating settings page.
+            page.title = "Settings";
+            page.description = "Settings of Rustdoc";
+            page.root_path = "./";
+            page.rust_logo = true;
 
-        let sidebar = "<h2 class=\"location\">Settings</h2><div class=\"sidebar-elems\"></div>";
-        let v = layout::render(
-            &shared.layout,
-            &page,
-            sidebar,
-            |buf: &mut Buffer| {
-                write!(
-                    buf,
-                    "<div class=\"main-heading\">\
-                     <h1>Rustdoc settings</h1>\
-                     <span class=\"out-of-band\">\
-                         <a id=\"back\" href=\"javascript:void(0)\" onclick=\"history.back();\">\
-                            Back\
-                        </a>\
-                     </span>\
-                     </div>\
-                     <noscript>\
-                        <section>\
-                            You need to enable JavaScript be able to update your settings.\
-                        </section>\
-                     </noscript>\
-                     <script defer src=\"{static_root_path}{settings_js}\"></script>",
-                    static_root_path = page.get_static_root_path(),
-                    settings_js = static_files::STATIC_FILES.settings_js,
-                );
-                // Pre-load all theme CSS files, so that switching feels seamless.
-                //
-                // When loading settings.html as a popover, the equivalent HTML is
-                // generated in main.js.
-                for file in &shared.style_files {
-                    if let Ok(theme) = file.basename() {
-                        write!(
-                            buf,
-                            "<link rel=\"preload\" href=\"{root_path}{theme}{suffix}.css\" \
-                                as=\"style\">",
-                            root_path = page.static_root_path.unwrap_or(""),
-                            suffix = page.resource_suffix,
-                        );
+            let sidebar = "<h2 class=\"location\">Settings</h2><div class=\"sidebar-elems\"></div>";
+            let v = layout::render(
+                &shared.layout,
+                &page,
+                sidebar,
+                |buf: &mut Buffer| {
+                    write!(
+                        buf,
+                        "<div class=\"main-heading\">\
+                         <h1>Rustdoc settings</h1>\
+                         <span class=\"out-of-band\">\
+                             <a id=\"back\" href=\"javascript:void(0)\" onclick=\"history.back();\">\
+                                Back\
+                            </a>\
+                         </span>\
+                         </div>\
+                         <noscript>\
+                            <section>\
+                                You need to enable JavaScript be able to update your settings.\
+                            </section>\
+                         </noscript>\
+                         <script defer src=\"{static_root_path}{settings_js}\"></script>",
+                        static_root_path = page.get_static_root_path(),
+                        settings_js = static_files::STATIC_FILES.settings_js,
+                    );
+                    // Pre-load all theme CSS files, so that switching feels seamless.
+                    //
+                    // When loading settings.html as a popover, the equivalent HTML is
+                    // generated in main.js.
+                    for file in &shared.style_files {
+                        if let Ok(theme) = file.basename() {
+                            write!(
+                                buf,
+                                "<link rel=\"preload\" href=\"{root_path}{theme}{suffix}.css\" \
+                                    as=\"style\">",
+                                root_path = page.static_root_path.unwrap_or(""),
+                                suffix = page.resource_suffix,
+                            );
+                        }
                     }
-                }
-            },
-            &shared.style_files,
-        );
-        shared.fs.write(settings_file, v)?;
+                },
+                &shared.style_files,
+            );
+            shared.fs.write(settings_file, v)?;
 
-        // Generating help page.
-        page.title = "Help";
-        page.description = "Documentation for Rustdoc";
-        page.root_path = "./";
-        page.rust_logo = true;
+            // Generating help page.
+            page.title = "Help";
+            page.description = "Documentation for Rustdoc";
+            page.root_path = "./";
+            page.rust_logo = true;
 
-        let sidebar = "<h2 class=\"location\">Help</h2><div class=\"sidebar-elems\"></div>";
-        let v = layout::render(
-            &shared.layout,
-            &page,
-            sidebar,
-            |buf: &mut Buffer| {
-                write!(
-                    buf,
-                    "<div class=\"main-heading\">\
-                     <h1>Rustdoc help</h1>\
-                     <span class=\"out-of-band\">\
-                         <a id=\"back\" href=\"javascript:void(0)\" onclick=\"history.back();\">\
-                            Back\
-                        </a>\
-                     </span>\
-                     </div>\
-                     <noscript>\
-                        <section>\
-                            <p>You need to enable JavaScript to use keyboard commands or search.</p>\
-                            <p>For more information, browse the <a href=\"https://doc.rust-lang.org/rustdoc/\">rustdoc handbook</a>.</p>\
-                        </section>\
-                     </noscript>",
-                )
-            },
-            &shared.style_files,
-        );
-        shared.fs.write(help_file, v)?;
+            let sidebar = "<h2 class=\"location\">Help</h2><div class=\"sidebar-elems\"></div>";
+            let v = layout::render(
+                &shared.layout,
+                &page,
+                sidebar,
+                |buf: &mut Buffer| {
+                    write!(
+                        buf,
+                        "<div class=\"main-heading\">\
+                         <h1>Rustdoc help</h1>\
+                         <span class=\"out-of-band\">\
+                             <a id=\"back\" href=\"javascript:void(0)\" onclick=\"history.back();\">\
+                                Back\
+                            </a>\
+                         </span>\
+                         </div>\
+                         <noscript>\
+                            <section>\
+                                <p>You need to enable JavaScript to use keyboard commands or search.</p>\
+                                <p>For more information, browse the <a href=\"https://doc.rust-lang.org/rustdoc/\">rustdoc handbook</a>.</p>\
+                            </section>\
+                         </noscript>",
+                    )
+                },
+                &shared.style_files,
+            );
+            shared.fs.write(help_file, v)?;
+        }
 
-        if shared.layout.scrape_examples_extension {
+        // if to avoid writing files to doc root unless we're on the final invocation
+        if shared.layout.scrape_examples_extension && shared.should_merge.write_rendered_cci {
             page.title = "About scraped examples";
             page.description = "How the scraped examples feature works in Rustdoc";
             let v = layout::render(

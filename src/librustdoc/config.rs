@@ -286,6 +286,12 @@ pub(crate) struct RenderOptions {
     pub(crate) no_emit_shared: bool,
     /// If `true`, HTML source code pages won't be generated.
     pub(crate) html_no_source: bool,
+    /// Whether we should read or write rendered cross-crate info in the doc root.
+    pub(crate) should_merge: ShouldMerge,
+    /// Path to crate-info for external crates.
+    pub(crate) include_parts_dir: Vec<PathToParts>,
+    /// Where to write crate-info
+    pub(crate) parts_out_dir: Option<PathToParts>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -488,6 +494,16 @@ impl Options {
         let extern_html_root_urls = match parse_extern_html_roots(matches) {
             Ok(ex) => ex,
             Err(err) => dcx.fatal(err),
+        };
+
+        let parts_out_dir =
+            match matches.opt_str("parts-out-dir").map(|p| PathToParts::from_flag(p)).transpose() {
+                Ok(parts_out_dir) => parts_out_dir,
+                Err(e) => dcx.fatal(e),
+            };
+        let include_parts_dir = match parse_include_parts_dir(matches) {
+            Ok(include_parts_dir) => include_parts_dir,
+            Err(e) => dcx.fatal(e),
         };
 
         let default_settings: Vec<Vec<(String, String)>> = vec![
@@ -730,6 +746,10 @@ impl Options {
         let extern_html_root_takes_precedence =
             matches.opt_present("extern-html-root-takes-precedence");
         let html_no_source = matches.opt_present("html-no-source");
+        let should_merge = match parse_merge(matches) {
+            Ok(result) => result,
+            Err(e) => dcx.fatal(format!("--merge option error: {e}")),
+        };
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
             dcx.fatal(
@@ -815,6 +835,9 @@ impl Options {
             call_locations,
             no_emit_shared: false,
             html_no_source,
+            should_merge,
+            include_parts_dir,
+            parts_out_dir,
         };
         Some((options, render_options))
     }
@@ -891,4 +914,70 @@ fn parse_extern_html_roots(
         externs.insert(name.to_string(), url.to_string());
     }
     Ok(externs)
+}
+
+/// Path directly to crate-info file.
+///
+/// For example, `/home/user/project/target/doc.parts/<crate>/crate-info`.
+#[derive(Clone, Debug)]
+pub(crate) struct PathToParts(pub(crate) PathBuf);
+
+impl PathToParts {
+    fn from_flag(path: String) -> Result<PathToParts, String> {
+        let mut path = PathBuf::from(path);
+        if path.exists() && path.is_dir() {
+            // racey check is fine here for diagnostics
+            Err(format!(
+                "must provide a directory to --parts-out-dir and --include-parts-dir, got: {path:?}"
+            ))
+        } else {
+            path.push("crate-info");
+            Ok(PathToParts(path))
+        }
+    }
+}
+
+/// Reports error if --include-parts-dir / crate-info is not a file
+fn parse_include_parts_dir(m: &getopts::Matches) -> Result<Vec<PathToParts>, String> {
+    let mut ret = Vec::new();
+    for p in m.opt_strs("include-parts-dir") {
+        let p = PathToParts::from_flag(p)?;
+        // this is just for diagnostic
+        if p.0.is_file() {
+            return Err(format!("--include-parts-dir expected {p:?} to be a file"));
+        }
+        ret.push(p);
+    }
+    Ok(ret)
+}
+
+/// Controls merging of cross-crate information
+#[derive(Debug, Clone)]
+pub(crate) struct ShouldMerge {
+    /// Should we append to existing cci in the doc root
+    pub(crate) read_rendered_cci: bool,
+    /// Should we write cci to the doc root
+    pub(crate) write_rendered_cci: bool,
+}
+
+/// Extracts read_rendered_cci and write_rendered_cci from command line arguments, or
+/// reports an error if an invalid option was provided
+fn parse_merge(m: &getopts::Matches) -> Result<ShouldMerge, &'static str> {
+    match m.opt_str("merge").as_deref() {
+        // default = read-write
+        None => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("none") if m.opt_present("include-parts-dir") => {
+            Err("--include-parts-dir not allowed if --merge=none")
+        }
+        Some("none") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: false }),
+        Some("shared") if m.opt_present("parts-out-dir") || m.opt_present("include-parts-dir") => {
+            Err("--parts-out-dir and --include-parts-dir not allowed if --merge=shared")
+        }
+        Some("shared") => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("finalize") if m.opt_present("parts-out-dir") => {
+            Err("--parts-out-dir not allowed if --merge=finalize")
+        }
+        Some("finalize") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: true }),
+        Some(_) => Err("argument to --merge must be `none`, `shared`, or `finalize`"),
+    }
 }

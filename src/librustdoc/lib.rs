@@ -604,6 +604,33 @@ fn opts() -> Vec<RustcOptGroup> {
                 "path to function call information (for displaying examples in the documentation)",
             )
         }),
+        unstable("merge", |o| {
+            o.optopt(
+                "",
+                "merge",
+                "Controls how rustdoc handles files from previously documented crates in the doc root
+                      none = Do not write cross-crate information to the --out-dir
+                      shared = Append current crate's info to files found in the --out-dir
+                      finalize = Write current crate's info and --include-parts-dir info to the --out-dir, overwriting conflicting files",
+                "none|shared|finalize",
+            )
+        }),
+        unstable("parts-out-dir", |o| {
+            o.optopt(
+                "",
+                "parts-out-dir",
+                "Writes trait implementations and other info for the current crate to provided path. Only use with --merge=none",
+                "path/to/doc.parts/<crate-name>",
+            )
+        }),
+        unstable("include-parts-dir", |o| {
+            o.optmulti(
+                "",
+                "include-parts-dir",
+                "Includes trait implementations and other crate info from provided path. Only use with --merge=finalize",
+                "path/to/doc.parts/<crate-name>",
+            )
+        }),
         // deprecated / removed options
         unstable("disable-minification", |o| o.optflagmulti("", "disable-minification", "removed")),
         stable("plugin-path", |o| {
